@@ -78,6 +78,13 @@
  *   POST /api/studio/motion          — Motion Control (precise actions up to 30s)
  *   DELETE /api/video/cancel/:id     — Cancel pending generation
  *   GET  /api/studio/models          — All 25+ AI models with capabilities
+ *   GET  /api/templates/video-edits     — CapCut-style video edit templates (velocity, transitions, beat-sync, etc.)
+ *   GET  /api/templates/video-edits/:id — Specific edit template details
+ *   POST /api/templates/video-edits/apply — Apply edit template to generate video
+ *   GET  /api/templates/trending         — Top trending video edit templates
+ *   POST /api/templates/community/share  — Share custom template to community
+ *   GET  /api/templates/community        — Browse community templates
+ *   POST /api/templates/community/:id/like — Like a community template
  *
  *   ── TEMPLATES LIBRARY ──
  *   GET  /api/templates              — Browse all templates by category/studio
@@ -129,10 +136,15 @@ const AT_BASE = process.env.AIRTABLE_BASE_ID || 'appW8HgIKOXzDXglL';
 const RESEND_KEY = process.env.RESEND_API_KEY || '';
 const ADMIN_SECRET = process.env.ADMIN_SECRET || 'se_admin_2026';
 
-// Higgsfield Video API
+// Higgsfield Video API — CORRECT base URL: platform.higgsfield.ai
+// Auth: Authorization: Key {api_key}:{api_secret}
+// Submit: POST https://platform.higgsfield.ai/{model_id}
+// Status: GET https://platform.higgsfield.ai/requests/{request_id}/status
+// Cancel: POST https://platform.higgsfield.ai/requests/{request_id}/cancel
+// Upload: POST https://platform.higgsfield.ai/files/generate-upload-url
 const HIGGSFIELD_API_KEY = process.env.HIGGSFIELD_API_KEY || '';
 const HIGGSFIELD_API_SECRET = process.env.HIGGSFIELD_API_SECRET || '';
-const HIGGSFIELD_BASE = process.env.HIGGSFIELD_BASE_URL || 'https://higgsfieldapi.com/api';
+const HIGGSFIELD_BASE = process.env.HIGGSFIELD_BASE_URL || 'https://platform.higgsfield.ai';
 
 // Upload-Post Social Publishing
 // Upload-Post handles platform routing via 'platform[]' param
@@ -699,42 +711,175 @@ async function postProcessVideo(videoUrl, overlayData = {}) {
 //  video translation + lip sync
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-// Available AI video models on Higgsfield
+// ━━━ HIGGSFIELD MODEL REGISTRY ━━━
+// Maps our shorthand IDs → real Higgsfield API model paths
+// CRITICAL: The model_id goes in the URL path: POST /{model_id}
+// NOT in the request body. This was the bug that broke everything.
+//
+// Verified working models (tested with real API calls):
+//   ✅ higgsfield-ai/soul/standard (text-to-image)
+//   ✅ higgsfield-ai/soul/reference (image-to-image, style transfer)
+//   ✅ higgsfield-ai/soul/character (image-to-image, identity preservation)
+//   ✅ bytedance/seedream/v4/text-to-image (text-to-image, 2K/4K)
+//   ✅ bytedance/seedream/v4/edit (image editing, needs image_urls array)
+//   ✅ higgsfield-ai/dop/lite (image-to-video)
+//   ✅ higgsfield-ai/dop/standard (image-to-video)
+//   ✅ higgsfield-ai/dop/turbo (image-to-video)
+//   ✅ higgsfield-ai/dop/standard/first-last-frame (I2V with first+last frame)
+//   ✅ higgsfield-ai/dop/lite/first-last-frame
+//   ✅ higgsfield-ai/dop/turbo/first-last-frame
+//   ✅ bytedance/seedance/v1/pro/image-to-video
+//   ✅ bytedance/seedance/v1/lite/image-to-video
+//   ✅ kling-video/v2.1/pro/image-to-video
+//   ✅ kling-video/v2.1/standard/image-to-video
+//   ✅ kling-video/v3.0/pro/image-to-video
+//   ✅ kling-video/v3.0/pro/text-to-video
+//   ❌ reve/text-to-image (model error — skip for now)
+//
+// Parameter constraints discovered:
+//   Soul aspect_ratio: '9:16', '16:9', '4:3', '3:4', '1:1', '2:3', '3:2'
+//   Seedream resolution: '2K' or '4K' only
+//   DOP sub-models: 'lite', 'standard', 'turbo', plus '/first-last-frame' variants
+//   Soul modes: 'standard', 'reference', 'character'
+
 const HIGGSFIELD_MODELS = {
-  // ── Premium Tier ──
-  'sora-2': { name: 'Sora 2', quality: 'premium', credits: 50, description: 'OpenAI Sora — photorealistic, excellent physics', capabilities: ['text-to-video', 'image-to-video'] },
-  'sora-2-max': { name: 'Sora 2 MAX', quality: 'premium', credits: 80, description: 'Maximum quality Sora — highest fidelity renders', capabilities: ['text-to-video', 'image-to-video'] },
-  'sora-2-pro-max': { name: 'Sora 2 Pro Max', quality: 'premium', credits: 100, description: 'Pro Max — ultra-premium cinematic output', capabilities: ['text-to-video', 'image-to-video'] },
-  'veo-3': { name: 'Google Veo 3', quality: 'premium', credits: 60, description: 'Google Veo 3 — native sound generation included', capabilities: ['text-to-video', 'image-to-video', 'audio'] },
-  'veo-3.1': { name: 'Google Veo 3.1', quality: 'premium', credits: 65, description: 'Latest Veo — improved quality + native audio', capabilities: ['text-to-video', 'image-to-video', 'audio'] },
-  'veo-3-fast': { name: 'Google Veo 3 Fast', quality: 'standard', credits: 30, description: 'Fast Veo variant for quick turnaround with audio', capabilities: ['text-to-video', 'image-to-video', 'audio'] },
-  'kling-3.0': { name: 'Kling 3.0', quality: 'premium', credits: 40, description: '15-second videos with character consistency', capabilities: ['text-to-video', 'image-to-video', 'multi-shot'] },
-  'kling-3.0-flf': { name: 'Kling 3.0 Full-Length Film', quality: 'premium', credits: 60, description: 'Best overall quality, cinematic motion', capabilities: ['text-to-video', 'image-to-video', 'multi-shot'] },
-  'kling-o1': { name: 'Kling o1', quality: 'premium', credits: 70, description: 'Reasoning model — understands complex scenes', capabilities: ['text-to-video', 'image-to-video'] },
-  // ── Standard Tier ──
-  'kling-2.6-audio': { name: 'Kling 2.6 Audio', quality: 'standard', credits: 20, description: 'Native audio + video generation in one pass', capabilities: ['text-to-video', 'image-to-video', 'audio', 'lipsync'] },
-  'kling-2.5-turbo': { name: 'Kling 2.5 Turbo', quality: 'fast', credits: 8, description: 'Fast generation, good for drafts', capabilities: ['text-to-video', 'image-to-video'] },
-  'kling-2.1': { name: 'Kling 2.1 Master', quality: 'standard', credits: 12, description: 'Fast, reliable, good character preservation', capabilities: ['text-to-video', 'image-to-video', 'soul'] },
-  'kling-avatars-2.0': { name: 'Kling Avatars 2.0', quality: 'standard', credits: 15, description: 'Long-form talking avatars from image + audio', capabilities: ['lipsync', 'avatar'] },
-  'seedance': { name: 'Seedance', quality: 'standard', credits: 10, description: 'Creative, artistic, strong motion dynamics', capabilities: ['text-to-video', 'image-to-video'] },
-  'seedance-pro': { name: 'Seedance Pro', quality: 'standard', credits: 18, description: 'Pro variant — better quality and consistency', capabilities: ['text-to-video', 'image-to-video'] },
-  'seedance-2.0': { name: 'Seedance 2.0', quality: 'premium', credits: 25, description: 'Marketing Studio powerhouse — native lip-sync, physics-aware', capabilities: ['text-to-video', 'image-to-video', 'marketing', 'lipsync'] },
-  'dop': { name: 'Higgsfield DOP', quality: 'standard', credits: 15, description: 'Director of Photography — granular VFX control', capabilities: ['text-to-video', 'image-to-video', 'cinema'] },
-  'dop-turbo': { name: 'DOP Turbo', quality: 'fast', credits: 8, description: 'Fast DOP for quick turnaround', capabilities: ['text-to-video', 'image-to-video'] },
-  'wan-2.5': { name: 'WAN 2.5', quality: 'standard', credits: 10, description: 'Audio-synchronized high-quality video', capabilities: ['text-to-video', 'image-to-video', 'audio'] },
-  'wan-2.2': { name: 'WAN 2.2 Image', quality: 'standard', credits: 8, description: 'Image generation model', capabilities: ['text-to-image'] },
-  'minimax-hailuo-02': { name: 'MiniMax Hailuo 02', quality: 'standard', credits: 12, description: 'MiniMax — excellent motion quality', capabilities: ['text-to-video', 'image-to-video'] },
-  'hunyuan': { name: 'Hunyuan', quality: 'standard', credits: 8, description: 'Tencent Hunyuan — excellent text rendering in video', capabilities: ['text-to-video', 'image-to-video'] },
-  'ltx-video': { name: 'LTX Video', quality: 'fast', credits: 5, description: 'Lightweight, fastest generation', capabilities: ['text-to-video', 'image-to-video'] },
-  // ── Image Models ──
-  'nano-banana-pro': { name: 'Nano Banana Pro', quality: 'premium', credits: 5, description: 'Best 4K image model — stunning aesthetics', capabilities: ['text-to-image'] },
-  'flux': { name: 'FLUX', quality: 'standard', credits: 3, description: 'Fast high-quality image generation', capabilities: ['text-to-image'] },
-  'flux-kontext': { name: 'FLUX Kontext', quality: 'standard', credits: 4, description: 'Context-aware image generation and editing', capabilities: ['text-to-image', 'image-edit'] },
-  'gpt-image': { name: 'GPT Image', quality: 'premium', credits: 5, description: 'OpenAI image generation', capabilities: ['text-to-image'] },
-  'seedream-5.0': { name: 'Seedream 5.0 Lite', quality: 'standard', credits: 3, description: 'Intelligent visual reasoning', capabilities: ['text-to-image'] },
-  'seedream-4.5': { name: 'Seedream 4.5', quality: 'standard', credits: 3, description: 'Real image editing', capabilities: ['image-edit'] },
-  'topaz': { name: 'Topaz', quality: 'standard', credits: 5, description: 'Quality enhancement and upscaling', capabilities: ['enhance', 'upscale'] },
+  // ━━ IMAGE GENERATION ━━
+  'soul-standard': {
+    name: 'Soul Standard', type: 'text-to-image', quality: 'premium', credits: 5,
+    api_model_id: 'higgsfield-ai/soul/standard',
+    description: 'Text-to-image — high quality, brand-consistent imagery',
+    capabilities: ['text-to-image'],
+    param_constraints: { aspect_ratio: ['9:16','16:9','4:3','3:4','1:1','2:3','3:2'] },
+  },
+  'soul-reference': {
+    name: 'Soul Reference', type: 'image-to-image', quality: 'premium', credits: 5,
+    api_model_id: 'higgsfield-ai/soul/reference',
+    description: 'Style transfer — apply reference image style to new generation',
+    capabilities: ['image-to-image', 'style-transfer'],
+    param_constraints: { aspect_ratio: ['9:16','16:9','4:3','3:4','1:1','2:3','3:2'], requires_image: true },
+  },
+  'soul-character': {
+    name: 'Soul Character', type: 'image-to-image', quality: 'premium', credits: 5,
+    api_model_id: 'higgsfield-ai/soul/character',
+    description: 'Identity preservation — maintain character/model consistency across images',
+    capabilities: ['image-to-image', 'identity-preservation'],
+    param_constraints: { aspect_ratio: ['9:16','16:9','4:3','3:4','1:1','2:3','3:2'], requires_image: true },
+  },
+  'seedream-v4': {
+    name: 'Seedream v4', type: 'text-to-image', quality: 'premium', credits: 3,
+    api_model_id: 'bytedance/seedream/v4/text-to-image',
+    description: 'ByteDance Seedream — stunning 2K/4K image generation',
+    capabilities: ['text-to-image'],
+    param_constraints: { resolution: ['2K','4K'] },
+  },
+  'seedream-v4-edit': {
+    name: 'Seedream v4 Edit', type: 'image-edit', quality: 'premium', credits: 4,
+    api_model_id: 'bytedance/seedream/v4/edit',
+    description: 'AI image editing — modify existing images with text prompts',
+    capabilities: ['image-edit'],
+    param_constraints: { resolution: ['2K','4K'], requires_image_urls: true },
+  },
+
+  // ━━ VIDEO GENERATION — DOP (Director of Photography) ━━
+  'dop-lite': {
+    name: 'DOP Lite', type: 'image-to-video', quality: 'fast', credits: 8,
+    api_model_id: 'higgsfield-ai/dop/lite',
+    description: 'Fast image-to-video — great for drafts and quick turnaround',
+    capabilities: ['image-to-video'],
+    param_constraints: { requires_image: true },
+  },
+  'dop-standard': {
+    name: 'DOP Standard', type: 'image-to-video', quality: 'standard', credits: 15,
+    api_model_id: 'higgsfield-ai/dop/standard',
+    description: 'Director of Photography — balanced quality and speed',
+    capabilities: ['image-to-video', 'cinema'],
+    param_constraints: { requires_image: true },
+  },
+  'dop-turbo': {
+    name: 'DOP Turbo', type: 'image-to-video', quality: 'standard', credits: 12,
+    api_model_id: 'higgsfield-ai/dop/turbo',
+    description: 'DOP Turbo — high quality with faster generation',
+    capabilities: ['image-to-video'],
+    param_constraints: { requires_image: true },
+  },
+  'dop-standard-flf': {
+    name: 'DOP Standard FLF', type: 'image-to-video', quality: 'premium', credits: 20,
+    api_model_id: 'higgsfield-ai/dop/standard/first-last-frame',
+    description: 'First-Last Frame — control start and end frames for precise storytelling',
+    capabilities: ['image-to-video', 'first-last-frame'],
+    param_constraints: { requires_image: true, supports_last_frame: true },
+  },
+  'dop-lite-flf': {
+    name: 'DOP Lite FLF', type: 'image-to-video', quality: 'fast', credits: 10,
+    api_model_id: 'higgsfield-ai/dop/lite/first-last-frame',
+    description: 'Fast First-Last Frame generation',
+    capabilities: ['image-to-video', 'first-last-frame'],
+    param_constraints: { requires_image: true, supports_last_frame: true },
+  },
+  'dop-turbo-flf': {
+    name: 'DOP Turbo FLF', type: 'image-to-video', quality: 'standard', credits: 15,
+    api_model_id: 'higgsfield-ai/dop/turbo/first-last-frame',
+    description: 'Turbo First-Last Frame generation',
+    capabilities: ['image-to-video', 'first-last-frame'],
+    param_constraints: { requires_image: true, supports_last_frame: true },
+  },
+
+  // ━━ VIDEO GENERATION — Seedance (ByteDance) ━━
+  'seedance-pro': {
+    name: 'Seedance Pro', type: 'image-to-video', quality: 'premium', credits: 18,
+    api_model_id: 'bytedance/seedance/v1/pro/image-to-video',
+    description: 'Seedance Pro — premium quality motion with physics awareness',
+    capabilities: ['image-to-video'],
+    param_constraints: { requires_image: true },
+  },
+  'seedance-lite': {
+    name: 'Seedance Lite', type: 'image-to-video', quality: 'standard', credits: 10,
+    api_model_id: 'bytedance/seedance/v1/lite/image-to-video',
+    description: 'Seedance Lite — fast creative motion generation',
+    capabilities: ['image-to-video'],
+    param_constraints: { requires_image: true },
+  },
+
+  // ━━ VIDEO GENERATION — Kling ━━
+  'kling-2.1-pro': {
+    name: 'Kling 2.1 Pro', type: 'image-to-video', quality: 'standard', credits: 12,
+    api_model_id: 'kling-video/v2.1/pro/image-to-video',
+    description: 'Kling 2.1 Pro — reliable, good character preservation',
+    capabilities: ['image-to-video'],
+    param_constraints: { requires_image: true },
+  },
+  'kling-2.1-standard': {
+    name: 'Kling 2.1 Standard', type: 'image-to-video', quality: 'fast', credits: 8,
+    api_model_id: 'kling-video/v2.1/standard/image-to-video',
+    description: 'Kling 2.1 Standard — fast generation, great for drafts',
+    capabilities: ['image-to-video'],
+    param_constraints: { requires_image: true },
+  },
+  'kling-3.0-i2v': {
+    name: 'Kling 3.0 Image-to-Video', type: 'image-to-video', quality: 'premium', credits: 40,
+    api_model_id: 'kling-video/v3.0/pro/image-to-video',
+    description: 'Kling 3.0 Pro — best cinematic quality, premium motion',
+    capabilities: ['image-to-video'],
+    param_constraints: { requires_image: true },
+  },
+  'kling-3.0-t2v': {
+    name: 'Kling 3.0 Text-to-Video', type: 'text-to-video', quality: 'premium', credits: 40,
+    api_model_id: 'kling-video/v3.0/pro/text-to-video',
+    description: 'Kling 3.0 Pro — text-to-video, best overall video quality',
+    capabilities: ['text-to-video'],
+    param_constraints: {},
+  },
 };
+
+// Helper: resolve shorthand model key → full API model_id path
+function resolveModelId(modelKey) {
+  const entry = HIGGSFIELD_MODELS[modelKey];
+  if (entry && entry.api_model_id) return entry.api_model_id;
+  // If they passed a full path directly (e.g. 'higgsfield-ai/dop/turbo'), use it as-is
+  if (modelKey && modelKey.includes('/')) return modelKey;
+  // Default fallback
+  return null;
+}
 
 // 50+ Camera Effects / Motion Presets
 const CAMERA_EFFECTS = {
@@ -833,17 +978,41 @@ const TRENDING_AUDIO = {
 };
 
 /**
- * Core Higgsfield API call — handles all video generation modes
+ * Core Higgsfield API call — handles ALL generation modes (image + video)
+ * 
+ * CRITICAL API DETAILS (verified by real testing):
+ *   Submit:  POST https://platform.higgsfield.ai/{model_id}
+ *   Status:  GET  https://platform.higgsfield.ai/requests/{request_id}/status
+ *   Cancel:  POST https://platform.higgsfield.ai/requests/{request_id}/cancel
+ *   Upload:  POST https://platform.higgsfield.ai/files/generate-upload-url
+ *   Auth:    Authorization: Key {api_key}:{api_secret}
+ * 
+ * The model_id goes in the URL PATH, not the request body.
+ * 
  * @param {Object} params - Generation parameters
- * @returns {Object} { generation_id, status_url }
+ * @param {string} params.model - Model shorthand key (e.g. 'dop-turbo') or full API path
+ * @param {string} params.prompt - Text prompt
+ * @param {string} [params.image_url] - Input image URL (for I2V and image-to-image)
+ * @param {string[]} [params.image_urls] - Array of image URLs (for Seedream edit)
+ * @param {string[]} [params.reference_image_urls] - Reference images (for Soul modes)
+ * @param {number} [params.duration] - Video duration in seconds
+ * @param {string} [params.resolution] - Resolution (720p, 1080p, 2K, 4K)
+ * @param {string} [params.aspect_ratio] - Aspect ratio
+ * @param {number} [params.seed] - Seed for reproducibility
+ * @param {boolean} [params.camera_fixed] - Lock camera position
+ * @param {boolean} [params.enhance_prompt] - AI prompt enhancement
+ * @param {string} [params.last_frame_image_url] - Last frame for FLF models
+ * @returns {Object} { request_id, status, ... }
  */
 async function higgsFieldGenerate(params) {
   const {
     prompt,
     image_url = null,
+    image_urls = null,
     reference_image_urls = null,
+    last_frame_image_url = null,
     duration = 5,
-    resolution = '720p',
+    resolution = null,
     aspect_ratio = '9:16',
     seed = null,
     camera_fixed = false,
@@ -852,9 +1021,18 @@ async function higgsFieldGenerate(params) {
     model = null,
   } = params;
   
+  // Resolve model shorthand → full API model_id path
+  const apiModelId = resolveModelId(model);
+  if (!apiModelId) {
+    throw new Error(`Unknown Higgsfield model: ${model}. Check HIGGSFIELD_MODELS registry.`);
+  }
+  
+  // Build request body — model goes in URL, not body
   const body = { prompt };
   if (image_url) body.image_url = image_url;
+  if (image_urls && image_urls.length > 0) body.image_urls = image_urls;
   if (reference_image_urls && reference_image_urls.length > 0) body.reference_image_urls = reference_image_urls.slice(0, 5);
+  if (last_frame_image_url) body.last_frame_image_url = last_frame_image_url;
   if (duration) body.duration = duration;
   if (resolution) body.resolution = resolution;
   if (aspect_ratio) body.aspect_ratio = aspect_ratio;
@@ -862,9 +1040,12 @@ async function higgsFieldGenerate(params) {
   if (camera_fixed) body.camera_fixed = true;
   if (enhance_prompt !== undefined) body.enhance_prompt = enhance_prompt;
   if (motion_id) body.motion_id = motion_id;
-  if (model) body.model = model;
   
-  const res = await fetch(`${HIGGSFIELD_BASE}/v1/generate`, {
+  // CORRECT endpoint: POST /{model_id} — model in URL path
+  const url = `${HIGGSFIELD_BASE}/${apiModelId}`;
+  log('HIGGSFIELD', `POST ${url} | model=${model} | prompt=${(prompt || '').substring(0, 60)}...`);
+  
+  const res = await fetch(url, {
     method: 'POST',
     headers: {
       'Authorization': `Key ${HIGGSFIELD_API_KEY}:${HIGGSFIELD_API_SECRET}`,
@@ -875,52 +1056,101 @@ async function higgsFieldGenerate(params) {
   
   if (!res.ok) {
     const errText = await res.text();
+    log('HIGGSFIELD', `Generate failed (${res.status}): ${errText}`);
     throw new Error(`Higgsfield generate failed (${res.status}): ${errText}`);
   }
   
-  return res.json();
+  const data = await res.json();
+  log('HIGGSFIELD', `Submitted: request_id=${data.request_id || data.id || 'unknown'}`);
+  return data;
 }
 
 /**
- * Poll Higgsfield for video completion
- * @param {string} generationId - The generation_id from generate call
+ * Poll Higgsfield for generation completion
+ * CORRECT endpoint: GET /requests/{request_id}/status
+ * 
+ * Status values: 'pending', 'processing', 'completed', 'failed'
+ * On completion, response includes output URLs (image_url, video_url, etc.)
+ * 
+ * @param {string} requestId - The request_id from generate call
  * @param {number} maxWaitMs - Maximum wait time in milliseconds (default 5 min)
- * @returns {Object} Final status including video_url
+ * @returns {Object} Final status including output URLs
  */
-async function pollHiggsFieldStatus(generationId, maxWaitMs = 300000) {
+async function pollHiggsFieldStatus(requestId, maxWaitMs = 300000) {
   const startTime = Date.now();
   const pollInterval = 5000; // 5 seconds between polls
   
+  // CORRECT endpoint: GET /requests/{request_id}/status
+  const statusUrl = `${HIGGSFIELD_BASE}/requests/${requestId}/status`;
+  log('HIGGSFIELD', `Polling status: ${statusUrl}`);
+  
   while (Date.now() - startTime < maxWaitMs) {
-    const res = await fetch(`${HIGGSFIELD_BASE}/v1/status/${generationId}`, {
+    const res = await fetch(statusUrl, {
       headers: { 'Authorization': `Key ${HIGGSFIELD_API_KEY}:${HIGGSFIELD_API_SECRET}` },
     });
     
     if (!res.ok) {
       const errText = await res.text();
+      // Don't throw on transient errors — retry
+      if (res.status >= 500) {
+        log('HIGGSFIELD', `Status check server error (${res.status}), retrying...`);
+        await sleep(pollInterval);
+        continue;
+      }
       throw new Error(`Higgsfield status failed (${res.status}): ${errText}`);
     }
     
     const data = await res.json();
+    log('HIGGSFIELD', `Status: ${data.status} | request_id=${requestId}`);
     
     if (data.status === 'completed' || data.status === 'done') {
+      log('HIGGSFIELD', `Completed! Output: ${JSON.stringify(data).substring(0, 200)}...`);
       return data;
     }
     
     if (data.status === 'failed' || data.status === 'error') {
-      throw new Error(`Higgsfield generation failed: ${data.error || data.message || 'Unknown error'}`);
+      throw new Error(`Higgsfield generation failed: ${data.error || data.message || JSON.stringify(data)}`);
     }
     
-    // Still processing — wait and retry
+    // Still processing (pending/processing) — wait and retry
     await sleep(pollInterval);
   }
   
-  throw new Error(`Higgsfield generation timed out after ${maxWaitMs / 1000}s`);
+  // Timeout — try to cancel the request
+  try {
+    await fetch(`${HIGGSFIELD_BASE}/requests/${requestId}/cancel`, {
+      method: 'POST',
+      headers: { 'Authorization': `Key ${HIGGSFIELD_API_KEY}:${HIGGSFIELD_API_SECRET}` },
+    });
+    log('HIGGSFIELD', `Cancelled timed-out request: ${requestId}`);
+  } catch (e) { /* ignore cancel errors */ }
+  
+  throw new Error(`Higgsfield generation timed out after ${maxWaitMs / 1000}s (request_id: ${requestId})`);
+}
+
+/**
+ * Extract output URL from Higgsfield response
+ * Different models return URLs in different fields
+ */
+function extractOutputUrl(data) {
+  // Check all known output URL fields
+  return data.video_url || data.output_url || data.image_url || data.url 
+    || (data.output && (data.output.video_url || data.output.image_url || data.output.url))
+    || (data.result && (data.result.video_url || data.result.image_url || data.result.url))
+    || null;
+}
+
+/**
+ * Extract request_id from Higgsfield response
+ * API returns 'request_id' but handle variations
+ */
+function extractRequestId(data) {
+  return data.request_id || data.id || data.generation_id || null;
 }
 
 /**
  * Generate video from image (Image-to-Video mode)
- * Uses Higgsfield API — auto-detects mode from prompt + image_url
+ * Auto-selects best model if none specified
  */
 async function generateVideoFromImage(imageUrl, prompt, durationSec = 5, options = {}) {
   if (!HIGGSFIELD_API_KEY) {
@@ -929,33 +1159,37 @@ async function generateVideoFromImage(imageUrl, prompt, durationSec = 5, options
   }
   
   try {
-    log('VIDEO', `Generating image-to-video: ${prompt.substring(0, 80)}...`);
+    // Default to DOP Standard for image-to-video if no model specified
+    const model = options.model || 'dop-standard';
+    log('VIDEO', `Generating image-to-video [${model}]: ${prompt.substring(0, 80)}...`);
     
     const genResult = await higgsFieldGenerate({
       prompt,
       image_url: imageUrl,
       duration: durationSec,
-      resolution: options.resolution || '720p',
+      resolution: options.resolution || null,
       aspect_ratio: options.aspect_ratio || '9:16',
       camera_fixed: options.camera_fixed || false,
       enhance_prompt: options.enhance_prompt !== false,
       motion_id: options.motion_id || null,
-      model: options.model || null,
+      model,
       seed: options.seed || null,
+      last_frame_image_url: options.last_frame_image_url || null,
     });
     
-    log('VIDEO', `Generation started: ${genResult.generation_id}`);
+    const requestId = extractRequestId(genResult);
+    log('VIDEO', `Generation started: request_id=${requestId}`);
     
     // Poll for completion
-    const result = await pollHiggsFieldStatus(genResult.generation_id);
-    const videoUrl = result.video_url || result.output_url || result.url;
+    const result = await pollHiggsFieldStatus(requestId);
+    const outputUrl = extractOutputUrl(result);
     
-    if (videoUrl) {
-      log('VIDEO', `Video ready: ${videoUrl.substring(0, 80)}...`);
-      return videoUrl;
+    if (outputUrl) {
+      log('VIDEO', `Output ready: ${outputUrl.substring(0, 80)}...`);
+      return outputUrl;
     }
     
-    log('VIDEO', 'Video generation completed but no URL returned');
+    log('VIDEO', 'Generation completed but no URL returned');
     return null;
   } catch (e) {
     log('VIDEO', `Image-to-video failed: ${e.message}`);
@@ -973,30 +1207,114 @@ async function generateTextToVideo(prompt, options = {}) {
   }
   
   try {
-    log('VIDEO', `Generating text-to-video: ${prompt.substring(0, 80)}...`);
+    // Default to Kling 3.0 for text-to-video if no model specified
+    const model = options.model || 'kling-3.0-t2v';
+    log('VIDEO', `Generating text-to-video [${model}]: ${prompt.substring(0, 80)}...`);
     
     const genResult = await higgsFieldGenerate({
       prompt,
       duration: options.duration || 5,
-      resolution: options.resolution || '720p',
+      resolution: options.resolution || null,
       aspect_ratio: options.aspect_ratio || '9:16',
       camera_fixed: options.camera_fixed || false,
       enhance_prompt: options.enhance_prompt !== false,
       motion_id: options.motion_id || null,
-      model: options.model || null,
+      model,
       seed: options.seed || null,
     });
     
-    log('VIDEO', `Generation started: ${genResult.generation_id}`);
-    const result = await pollHiggsFieldStatus(genResult.generation_id);
-    const videoUrl = result.video_url || result.output_url || result.url;
+    const requestId = extractRequestId(genResult);
+    log('VIDEO', `Generation started: request_id=${requestId}`);
+    const result = await pollHiggsFieldStatus(requestId);
+    const outputUrl = extractOutputUrl(result);
     
-    if (videoUrl) {
-      log('VIDEO', `Video ready: ${videoUrl.substring(0, 80)}...`);
+    if (outputUrl) {
+      log('VIDEO', `Output ready: ${outputUrl.substring(0, 80)}...`);
     }
-    return videoUrl || null;
+    return outputUrl || null;
   } catch (e) {
     log('VIDEO', `Text-to-video failed: ${e.message}`);
+    return null;
+  }
+}
+
+/**
+ * Generate image with Soul modes (standard, reference, character)
+ * @param {string} prompt - Image prompt
+ * @param {Object} options - { mode: 'standard'|'reference'|'character', image_url, aspect_ratio }
+ */
+async function generateSoulImage(prompt, options = {}) {
+  if (!HIGGSFIELD_API_KEY) {
+    log('IMAGE', 'Higgsfield API key not set — skipping image generation');
+    return null;
+  }
+  
+  const mode = options.mode || 'standard';
+  const model = `soul-${mode}`; // soul-standard, soul-reference, soul-character
+  
+  try {
+    log('IMAGE', `Generating Soul ${mode} image: ${prompt.substring(0, 80)}...`);
+    
+    const genResult = await higgsFieldGenerate({
+      prompt,
+      image_url: options.image_url || null,
+      aspect_ratio: options.aspect_ratio || '1:1',
+      model,
+      seed: options.seed || null,
+      enhance_prompt: options.enhance_prompt !== false,
+    });
+    
+    const requestId = extractRequestId(genResult);
+    log('IMAGE', `Generation started: request_id=${requestId}`);
+    const result = await pollHiggsFieldStatus(requestId);
+    const outputUrl = extractOutputUrl(result);
+    
+    if (outputUrl) {
+      log('IMAGE', `Image ready: ${outputUrl.substring(0, 80)}...`);
+    }
+    return outputUrl || null;
+  } catch (e) {
+    log('IMAGE', `Soul ${mode} failed: ${e.message}`);
+    return null;
+  }
+}
+
+/**
+ * Generate image with Seedream (text-to-image or edit)
+ */
+async function generateSeedreamImage(prompt, options = {}) {
+  if (!HIGGSFIELD_API_KEY) {
+    log('IMAGE', 'Higgsfield API key not set — skipping image generation');
+    return null;
+  }
+  
+  const isEdit = options.image_urls && options.image_urls.length > 0;
+  const model = isEdit ? 'seedream-v4-edit' : 'seedream-v4';
+  
+  try {
+    log('IMAGE', `Generating Seedream ${isEdit ? 'edit' : 'v4'}: ${prompt.substring(0, 80)}...`);
+    
+    const genResult = await higgsFieldGenerate({
+      prompt,
+      image_urls: isEdit ? options.image_urls : null,
+      resolution: options.resolution || '2K',
+      aspect_ratio: options.aspect_ratio || '1:1',
+      model,
+      seed: options.seed || null,
+      enhance_prompt: options.enhance_prompt !== false,
+    });
+    
+    const requestId = extractRequestId(genResult);
+    log('IMAGE', `Generation started: request_id=${requestId}`);
+    const result = await pollHiggsFieldStatus(requestId);
+    const outputUrl = extractOutputUrl(result);
+    
+    if (outputUrl) {
+      log('IMAGE', `Image ready: ${outputUrl.substring(0, 80)}...`);
+    }
+    return outputUrl || null;
+  } catch (e) {
+    log('IMAGE', `Seedream failed: ${e.message}`);
     return null;
   }
 }
@@ -1017,23 +1335,25 @@ async function generateSoulModeVideo(prompt, referenceImages, options = {}) {
   }
   
   try {
-    log('VIDEO', `Generating soul mode video with ${referenceImages.length} reference images`);
+    const model = options.model || 'dop-standard';
+    log('VIDEO', `Generating soul mode video [${model}] with ${referenceImages.length} reference images`);
     
     const genResult = await higgsFieldGenerate({
       prompt,
       reference_image_urls: referenceImages.slice(0, 5),
       duration: options.duration || 5,
-      resolution: options.resolution || '720p',
+      resolution: options.resolution || null,
       aspect_ratio: options.aspect_ratio || '9:16',
       camera_fixed: options.camera_fixed || false,
       enhance_prompt: options.enhance_prompt !== false,
       motion_id: options.motion_id || null,
-      model: options.model || null,
+      model,
       seed: options.seed || null,
     });
     
-    log('VIDEO', `Soul mode generation started: ${genResult.generation_id}`);
-    const result = await pollHiggsFieldStatus(genResult.generation_id);
+    const requestId = extractRequestId(genResult);
+    log('VIDEO', `Soul mode generation started: request_id=${requestId}`);
+    const result = await pollHiggsFieldStatus(requestId);
     const videoUrl = result.video_url || result.output_url || result.url;
     
     if (videoUrl) {
@@ -1372,7 +1692,7 @@ async function publishPost(post) {
     const res = await fetch(`${UPLOADPOST_API_BASE}/api/upload`, {
       method: 'POST',
       headers: {
-        'Authorization': `Apikey ${UPLOADPOST_API_KEY}`,
+        'Authorization': `ApiKey ${UPLOADPOST_API_KEY}`,
       },
       body: formData,
     });
@@ -1612,9 +1932,14 @@ Return JSON with this exact structure:
 Times: Instagram 12pm/6pm, TikTok 5pm/8pm, Facebook 10am/2pm, Pinterest 1pm/8pm.
 Distribute evenly across platforms and dates.`;
 
+  // ━━ LEARNING CONTEXT: Inject client feedback history into generation ━━
+  const learningCtx = await buildLearningContext(clientName);
+  const motionDNACtx = await loadMotionDNA(clientName);
+  const enrichedPrompt = prompt + learningCtx + (motionDNACtx?.context || '');
+
   const completion = await openai.chat.completions.create({
     model: 'sonar-pro',
-    messages: [{ role: 'user', content: prompt }],
+    messages: [{ role: 'user', content: enrichedPrompt }],
     temperature: 0.8,
     
   });
@@ -2521,8 +2846,181 @@ function buildApprovalReminderEmail(name, count, email) {
 //  API ENDPOINTS
 // ────────────────────────────────────────────
 
+// ━━━ CONTINUOUS LEARNING ENGINE ━━━
+// Every approve, reject, regeneration, and edit teaches the AI what "on-brand" means
+// for each specific client. This is the secret sauce.
+
+/**
+ * Update brand voice learning history with a new signal
+ * @param {string} clientName - Client brand name
+ * @param {string} action - 'approved'|'rejected'|'regenerated'|'edited'
+ * @param {Object} data - Content attributes, reason, diff, etc.
+ */
+async function updateLearningHistory(clientName, action, data = {}) {
+  try {
+    const bvFormula = encodeURIComponent(`{client_id}='${clientName}'`);
+    const existing = await atGet(TBL.BRAND_VOICES, `filterByFormula=${bvFormula}&maxRecords=1`);
+    
+    if (!existing?.records?.length) {
+      log('LEARN', `No brand voice record for ${clientName} — skipping learning update`);
+      return;
+    }
+    
+    const record = existing.records[0];
+    let learningHistory = {};
+    try { learningHistory = JSON.parse(record.fields.learning_history || '{}'); } catch {}
+    
+    // Update counters
+    learningHistory.total_interactions = (learningHistory.total_interactions || 0) + 1;
+    learningHistory[`${action}_count`] = (learningHistory[`${action}_count`] || 0) + 1;
+    learningHistory.last_interaction = new Date().toISOString();
+    
+    // Store signal details
+    if (!learningHistory.recent_signals) learningHistory.recent_signals = [];
+    learningHistory.recent_signals.unshift({
+      action,
+      timestamp: new Date().toISOString(),
+      content_type: data.content_type || 'post',
+      reason: data.reason || null,
+      original_caption: data.original_caption ? data.original_caption.substring(0, 200) : null,
+      edited_caption: data.edited_caption ? data.edited_caption.substring(0, 200) : null,
+      model_used: data.model_used || null,
+      platform: data.platform || null,
+    });
+    // Keep last 100 signals
+    learningHistory.recent_signals = learningHistory.recent_signals.slice(0, 100);
+    
+    // Calculate brand accuracy improvement
+    const totalActions = (learningHistory.approved_count || 0) + (learningHistory.rejected_count || 0);
+    if (totalActions > 0) {
+      learningHistory.approval_rate = Math.round(((learningHistory.approved_count || 0) / totalActions) * 100);
+      // Brand accuracy starts at 60% and improves with data
+      learningHistory.brand_accuracy_score = Math.min(98, 60 + Math.round(Math.log(totalActions + 1) * 8 * (learningHistory.approval_rate / 100)));
+    }
+    
+    // Store caption corrections for learning (edited captions vs originals)
+    if (action === 'edited' && data.original_caption && data.edited_caption) {
+      if (!learningHistory.caption_corrections) learningHistory.caption_corrections = [];
+      learningHistory.caption_corrections.unshift({
+        original: data.original_caption.substring(0, 300),
+        edited: data.edited_caption.substring(0, 300),
+        timestamp: new Date().toISOString(),
+      });
+      learningHistory.caption_corrections = learningHistory.caption_corrections.slice(0, 50);
+    }
+    
+    // Store rejection reasons for pattern analysis
+    if (action === 'rejected' && data.reason) {
+      if (!learningHistory.rejection_patterns) learningHistory.rejection_patterns = [];
+      learningHistory.rejection_patterns.unshift(data.reason.substring(0, 200));
+      learningHistory.rejection_patterns = learningHistory.rejection_patterns.slice(0, 30);
+    }
+    
+    // Store model preferences (which models get approved vs rejected)
+    if (data.model_used) {
+      if (!learningHistory.model_preferences) learningHistory.model_preferences = {};
+      if (!learningHistory.model_preferences[data.model_used]) {
+        learningHistory.model_preferences[data.model_used] = { approved: 0, rejected: 0 };
+      }
+      if (action === 'approved') learningHistory.model_preferences[data.model_used].approved++;
+      if (action === 'rejected') learningHistory.model_preferences[data.model_used].rejected++;
+    }
+    
+    await atUpdate(TBL.BRAND_VOICES, record.id, {
+      learning_history: JSON.stringify(learningHistory),
+    });
+    
+    log('LEARN', `${clientName}: ${action} | total=${learningHistory.total_interactions} | accuracy=${learningHistory.brand_accuracy_score || 60}%`);
+  } catch (e) {
+    log('LEARN', `Learning update failed for ${clientName}: ${e.message}`);
+  }
+}
+
+/**
+ * Build learning context for prompt injection
+ * Used by content generation to include learning history in prompts
+ */
+async function buildLearningContext(clientName) {
+  try {
+    const bvFormula = encodeURIComponent(`{client_id}='${clientName}'`);
+    const existing = await atGet(TBL.BRAND_VOICES, `filterByFormula=${bvFormula}&maxRecords=1`);
+    if (!existing?.records?.length) return '';
+    
+    let history = {};
+    try { history = JSON.parse(existing.records[0].fields.learning_history || '{}'); } catch {}
+    
+    if (!history.total_interactions || history.total_interactions < 5) return '';
+    
+    let context = `\n\nLEARNING HISTORY (${history.total_interactions} interactions, ${history.brand_accuracy_score || 60}% accuracy):`;
+    context += `\n- Approved: ${history.approved_count || 0} | Rejected: ${history.rejected_count || 0} | Regenerated: ${history.regenerated_count || 0}`;
+    
+    if (history.rejection_patterns?.length) {
+      context += `\n- Common rejection reasons: ${history.rejection_patterns.slice(0, 5).join('; ')}`;
+    }
+    
+    if (history.caption_corrections?.length) {
+      context += `\n- Caption correction patterns (original → edited):`;
+      history.caption_corrections.slice(0, 3).forEach(c => {
+        context += `\n  "${c.original.substring(0, 60)}..." → "${c.edited.substring(0, 60)}..."`;
+      });
+    }
+    
+    if (history.model_preferences && Object.keys(history.model_preferences).length) {
+      const bestModel = Object.entries(history.model_preferences)
+        .sort(([,a],[,b]) => (b.approved/(b.approved+b.rejected+1)) - (a.approved/(a.approved+a.rejected+1)))[0];
+      if (bestModel) context += `\n- Preferred model: ${bestModel[0]} (${bestModel[1].approved} approved)`;
+    }
+    
+    context += `\n\nApply all learning to make content increasingly on-brand.`;
+    return context;
+  } catch (e) {
+    return '';
+  }
+}
+
+/**
+ * Load Motion DNA from brand voice for video generation
+ * Returns motion prompt fragments that make AI video look human-authentic
+ */
+async function loadMotionDNA(clientName) {
+  try {
+    const bvFormula = encodeURIComponent(`{client_id}='${clientName}'`);
+    const existing = await atGet(TBL.BRAND_VOICES, `filterByFormula=${bvFormula}&maxRecords=1`);
+    if (!existing?.records?.length) return null;
+    
+    const fields = existing.records[0].fields;
+    let motionDNA = null;
+    try { motionDNA = JSON.parse(fields.motion_dna || 'null'); } catch {}
+    
+    if (!motionDNA) return null;
+    
+    // Build motion context for Higgsfield prompt injection
+    let motionContext = '\n\nHUMAN MOTION DNA (from real video analysis of this brand):';
+    if (motionDNA.energy_level) motionContext += `\n- Energy: ${motionDNA.energy_level}`;
+    if (motionDNA.movement_flow) motionContext += `\n- Movement: ${motionDNA.movement_flow}`;
+    if (motionDNA.expression_default) motionContext += `\n- Expression: ${motionDNA.expression_default}`;
+    if (motionDNA.camera_behavior) motionContext += `\n- Camera relationship: ${motionDNA.camera_behavior}`;
+    if (motionDNA.transition_speed) motionContext += `\n- Transitions: ${motionDNA.transition_speed}`;
+    if (motionDNA.pose_vocabulary?.length) motionContext += `\n- Pose vocabulary: ${motionDNA.pose_vocabulary.join(', ')}`;
+    if (motionDNA.ugc_style_notes) motionContext += `\n- UGC style: ${motionDNA.ugc_style_notes}`;
+    
+    // The key: reusable prompt fragments
+    if (motionDNA.prompt_fragments?.length) {
+      motionContext += `\n\nMOTION PROMPT FRAGMENTS (inject into video generation):`;
+      motionDNA.prompt_fragments.forEach(f => { motionContext += `\n  → "${f}"`; });
+    }
+    
+    motionContext += `\n\nUse these motion patterns to make the video look like it was filmed by this brand's actual team.`;
+    
+    return { context: motionContext, fragments: motionDNA.prompt_fragments || [], raw: motionDNA };
+  } catch (e) {
+    log('MOTION', `Motion DNA load failed for ${clientName}: ${e.message}`);
+    return null;
+  }
+}
+
 // ── POST /api/approve-post ──
-// Client approves → status=Approved → immediate Upload-Post push attempt
+// Client approves → status=Approved → immediate Upload-Post push → learning signal
 app.post('/api/approve-post', async (req, res) => {
   const { postId, editedCaption } = req.body;
   if (!postId) return res.status(400).json({ error: 'Missing postId' });
@@ -2531,13 +3029,35 @@ app.post('/api/approve-post', async (req, res) => {
   if (!client) return res.status(401).json({ error: 'Unauthorized' });
 
   try {
+    const postRecord = await atGet(`${TBL.CONTENT}/${postId}`);
+    const originalCaption = postRecord?.fields?.caption || '';
+    
     // If client edited the caption before approving, save it first
-    const updateFields = { status: 'Approved' };
+    const updateFields = { status: 'Approved', client_action: 'approved' };
     if (editedCaption && editedCaption.trim()) {
       updateFields.full_post_text = editedCaption.trim();
       updateFields.caption = editedCaption.trim();
     }
     await atUpdate(TBL.CONTENT, postId, updateFields);
+
+    // ━━ LEARNING SIGNAL: Approve (+ optional edit) ━━
+    const clientName = client.fields.brand_name || client.fields.business_name || email;
+    const wasEdited = editedCaption && editedCaption.trim() && editedCaption.trim() !== originalCaption;
+    
+    updateLearningHistory(clientName, 'approved', {
+      content_type: postRecord?.fields?.content_type || 'post',
+      model_used: postRecord?.fields?.generation_model || null,
+      platform: postRecord?.fields?.platform || null,
+    }).catch(() => {}); // Non-blocking
+    
+    // If they edited before approving, that's also a learning signal
+    if (wasEdited) {
+      updateLearningHistory(clientName, 'edited', {
+        original_caption: originalCaption,
+        edited_caption: editedCaption.trim(),
+        content_type: postRecord?.fields?.content_type || 'post',
+      }).catch(() => {});
+    }
 
     // Immediately try to push to Upload-Post
     const post = await atGet(`${TBL.CONTENT}/${postId}`);
@@ -2548,10 +3068,9 @@ app.post('/api/approve-post', async (req, res) => {
         status: 'Scheduled',
         uploadpost_post_id: spResult.post_id?.toString() || '',
       });
-      log('APPROVE', `Post ${postId} approved + scheduled in Upload-Post`);
+      log('APPROVE', `Post ${postId} approved + scheduled + learning signal sent`);
       res.json({ success: true, status: 'Scheduled', message: 'Post approved and scheduled — it\'s in the queue.' });
     } else {
-      // API fallback — still approved, will be in next CSV export
       log('APPROVE', `Post ${postId} approved, queued for CSV export`);
       res.json({ success: true, status: 'Approved', message: 'Post approved and queued for scheduling.' });
     }
@@ -2599,8 +3118,19 @@ app.post('/api/reject-post', async (req, res) => {
     await atUpdate(TBL.CONTENT, postId, {
       status: 'Rejected',
       client_feedback: reason || '',
+      client_action: 'rejected',
       regen_count: regenCount,
     });
+
+    // ━━ LEARNING SIGNAL: Rejection ━━
+    const clientName = client.fields.brand_name || client.fields.business_name || req.body.email;
+    updateLearningHistory(clientName, 'rejected', {
+      reason: reason || 'No reason provided',
+      content_type: postFields.content_type || 'post',
+      model_used: postFields.generation_model || null,
+      platform: postFields.platform || null,
+      original_caption: postFields.caption || null,
+    }).catch(() => {}); // Non-blocking
 
     // Auto-regenerate if under limit (3 free regens)
     if (regenCount < 3) {
@@ -2653,7 +3183,16 @@ app.post('/api/regenerate-post', async (req, res) => {
     }
 
     // Mark as Regenerating so client sees progress in portal
-    await atUpdate(TBL.CONTENT, postId, { status: 'Regenerating', client_feedback: direction || '' });
+    await atUpdate(TBL.CONTENT, postId, { status: 'Regenerating', client_feedback: direction || '', client_action: 'regenerated' });
+    
+    // ━━ LEARNING SIGNAL: Regeneration ━━
+    const clientName = client.fields.brand_name || client.fields.business_name || req.body.email;
+    updateLearningHistory(clientName, 'regenerated', {
+      reason: direction || 'No specific direction',
+      content_type: postFields.content_type || 'post',
+      model_used: postFields.generation_model || null,
+      original_caption: postFields.caption || null,
+    }).catch(() => {}); // Non-blocking
 
     // Kick off in background
     regenerateSinglePost(postId, postFields, client, direction).catch(e =>
@@ -3300,10 +3839,14 @@ YOUR PERSONALITY & APPROACH:
 13. CONTENT GENERATION: If they ask you to generate/create posts, respond with a confirmation AND include [GENERATE_CONTENT] in your response.
 ${isFree ? '\nFREE PLAN: Naturally (not every message) reference that deeper features are available on Pro. Be subtle — "Your engagement would be fascinating to track in the Analytics Dashboard — that\'s one of the Pro features that really changes the game." Never be pushy.' : ''}`;
 
+    // ━━ LEARNING CONTEXT: Enrich coach with feedback history ━━
+    const learningCtx = await buildLearningContext(f.business_name || email);
+    const enrichedSystemPrompt = systemPrompt + learningCtx;
+
     const completion = await openai.chat.completions.create({
       model: 'sonar-pro',
       messages: [
-        { role: 'system', content: systemPrompt },
+        { role: 'system', content: enrichedSystemPrompt },
         ...history,
       ],
       max_tokens: 900,
@@ -4145,16 +4688,33 @@ app.post('/api/video/generate', async (req, res) => {
 });
 
 /**
- * GET /api/video/status/:id — Check video generation status
+ * GET /api/video/status/:id — Check generation status (video or image)
+ * Calls: GET https://platform.higgsfield.ai/requests/{request_id}/status
  */
 app.get('/api/video/status/:id', async (req, res) => {
   try {
-    const data = await pollHiggsFieldStatus(req.params.id, 5000); // Quick check, 5s timeout
+    // Quick single check — don't poll, just check once
+    const statusUrl = `${HIGGSFIELD_BASE}/requests/${req.params.id}/status`;
+    const statusRes = await fetch(statusUrl, {
+      headers: { 'Authorization': `Key ${HIGGSFIELD_API_KEY}:${HIGGSFIELD_API_SECRET}` },
+    });
+    
+    if (!statusRes.ok) {
+      const errText = await statusRes.text();
+      throw new Error(`Status check failed (${statusRes.status}): ${errText}`);
+    }
+    
+    const data = await statusRes.json();
+    
+    // Normalize response to include output URL in consistent field
+    if (data.status === 'completed' || data.status === 'done') {
+      data.output_url = extractOutputUrl(data);
+    }
+    
     res.json(data);
   } catch (e) {
-    // If timeout, return pending status
     if (e.message.includes('timed out')) {
-      return res.json({ status: 'processing', generation_id: req.params.id });
+      return res.json({ status: 'processing', request_id: req.params.id });
     }
     res.status(500).json({ error: e.message });
   }
@@ -4192,7 +4752,7 @@ app.get('/api/video/models', (req, res) => {
   const models = Object.entries(HIGGSFIELD_MODELS).map(([id, data]) => ({ id, ...data }));
   res.json({
     models,
-    default_model: 'kling-2.1',
+    default_model: 'kling-2.1-pro',
     premium_models: models.filter(m => m.quality === 'premium'),
     supported_resolutions: ['480p', '720p', '1080p'],
     supported_durations: [5, 10],
@@ -4311,6 +4871,10 @@ app.post('/api/ai-coach', async (req, res) => {
     } catch (e) {
       log('COACH', `Brand context load failed: ${e.message}`);
     }
+    
+    // ━━ LEARNING CONTEXT: Enrich coach with feedback history ━━
+    const coachLearningCtx = await buildLearningContext(clientName);
+    if (coachLearningCtx) brandContext += coachLearningCtx;
     
     // Build conversation history
     if (!chatHistories.has(clientId)) chatHistories.set(clientId, []);
@@ -4918,7 +5482,7 @@ app.post('/api/competitor-deep', async (req, res) => {
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 const UP_BASE = 'https://api.upload-post.com/api';
-const UP_HEADERS = { 'Authorization': `Apikey ${UPLOADPOST_API_KEY}`, 'Content-Type': 'application/json' };
+const UP_HEADERS = { 'Authorization': `ApiKey ${UPLOADPOST_API_KEY}`, 'Content-Type': 'application/json' };
 
 async function upPost(method, path, body = null) {
   const opts = { method, headers: UP_HEADERS };
@@ -5442,12 +6006,18 @@ app.post('/api/studio/marketing', async (req, res) => {
     
     // Build the Marketing Studio prompt with brand DNA
     const brandPrefix = buildBrandPromptPrefix(brandDNA, clientName);
-    const fullPrompt = `${brandPrefix}${PRODUCT_PRESERVATION_PROMPT}\n\nProduct: ${product_name || 'product'}\nDescription: ${product_description || ''}\nCreative Mode: ${mode}\nPlatform: ${(platforms || ['instagram']).join(', ')}\n\n${prompt || `Create a ${mode} video showcasing this product with authentic, scroll-stopping energy.`}`;
+    
+    // ━━ LEARNING + MOTION DNA: Enrich generation with client intelligence ━━
+    const learningCtx = await buildLearningContext(clientName);
+    const motionDNA = await loadMotionDNA(clientName);
+    const motionFragment = motionDNA?.fragments?.length ? `\nMotion direction: ${motionDNA.fragments[Math.floor(Math.random() * motionDNA.fragments.length)]}` : '';
+    
+    const fullPrompt = `${brandPrefix}${PRODUCT_PRESERVATION_PROMPT}\n\nProduct: ${product_name || 'product'}\nDescription: ${product_description || ''}\nCreative Mode: ${mode}\nPlatform: ${(platforms || ['instagram']).join(', ')}${motionFragment}${learningCtx}${motionDNA?.context || ''}\n\n${prompt || `Create a ${mode} video showcasing this product with authentic, scroll-stopping energy.`}`;
     
     // Call Higgsfield generate with marketing context
     const genBody = {
       prompt: fullPrompt,
-      model: 'seedance-2.0',  // Marketing Studio default
+      model: 'seedance-pro',  // Marketing Studio default
       duration: 10,
       aspect_ratio: '9:16',
       enhance_prompt: true,
@@ -5459,10 +6029,10 @@ app.post('/api/studio/marketing', async (req, res) => {
     
     res.json({
       success: true,
-      generation_id: genResult.generation_id,
-      status_url: `/api/video/status/${genResult.generation_id}`,
+      generation_id: extractRequestId(genResult),
+      status_url: `/api/video/status/${extractRequestId(genResult)}`,
       creative_mode: mode,
-      model: 'seedance-2.0',
+      model: 'seedance-pro',
       brand_dna_applied: !!brandDNA,
       product_preservation: true,
     });
@@ -5488,11 +6058,15 @@ app.post('/api/studio/cinema', async (req, res) => {
     const brandDNA = await loadBrandFingerprint(clientName);
     const brandPrefix = buildBrandPromptPrefix(brandDNA, clientName);
     
+    // ━━ LEARNING + MOTION DNA ━━
+    const learningCtx = await buildLearningContext(clientName);
+    const motionDNA = await loadMotionDNA(clientName);
+    
     const GENRES = ['action', 'horror', 'comedy', 'western', 'suspense', 'intimate', 'spectacle', 'noir', 'drama', 'epic'];
     const genreMode = GENRES.includes(genre) ? genre : null;
     
-    // Build cinema-specific prompt
-    let cinemaPrompt = `${brandPrefix}${PRODUCT_PRESERVATION_PROMPT}\n\n`;
+    // Build cinema-specific prompt with motion DNA
+    let cinemaPrompt = `${brandPrefix}${PRODUCT_PRESERVATION_PROMPT}${learningCtx}${motionDNA?.context || ''}\n\n`;
     if (genreMode) cinemaPrompt += `[GENRE: ${genreMode.toUpperCase()}] `;
     if (lens) cinemaPrompt += `[LENS: ${lens}] `;
     if (focal_length) cinemaPrompt += `[FOCAL LENGTH: ${focal_length}mm] `;
@@ -5520,7 +6094,7 @@ app.post('/api/studio/cinema', async (req, res) => {
         if (shot.reference_images || reference_images) genBody.reference_image_urls = (shot.reference_images || reference_images).slice(0, 5);
         
         const genResult = await higgsFieldGenerate(genBody);
-        results.push({ shot: i + 1, generation_id: genResult.generation_id, status_url: `/api/video/status/${genResult.generation_id}` });
+        results.push({ shot: i + 1, generation_id: extractRequestId(genResult), status_url: `/api/video/status/${extractRequestId(genResult)}` });
       }
       return res.json({ success: true, type: 'multi-shot', shots: results, total_shots: results.length });
     }
@@ -5540,8 +6114,8 @@ app.post('/api/studio/cinema', async (req, res) => {
     res.json({
       success: true,
       type: 'single-shot',
-      generation_id: genResult.generation_id,
-      status_url: `/api/video/status/${genResult.generation_id}`,
+      generation_id: extractRequestId(genResult),
+      status_url: `/api/video/status/${extractRequestId(genResult)}`,
       cinema_settings: { lens, focal_length, aperture, genre: genreMode, camera_movement },
       brand_dna_applied: !!brandDNA,
     });
@@ -5565,6 +6139,8 @@ app.post('/api/studio/lipsync', async (req, res) => {
     
     const clientName = client.fields.brand_name || email;
     const brandDNA = await loadBrandFingerprint(clientName);
+    const lipsyncLearningCtx = await buildLearningContext(clientName);
+    const lipsyncMotion = await loadMotionDNA(clientName);
     const brandPrefix = buildBrandPromptPrefix(brandDNA, clientName);
     
     const LIPSYNC_MODELS = ['speak-v2', 'lipsync-2', 'infinitetalk', 'kling-avatar', 'kling-lipsync', 'veo-3'];
@@ -5584,8 +6160,8 @@ app.post('/api/studio/lipsync', async (req, res) => {
     const genResult = await higgsFieldGenerate(genBody);
     res.json({
       success: true,
-      generation_id: genResult.generation_id,
-      status_url: `/api/video/status/${genResult.generation_id}`,
+      generation_id: extractRequestId(genResult),
+      status_url: `/api/video/status/${extractRequestId(genResult)}`,
       lipsync_model: lsModel,
       script_length: script.length,
       brand_dna_applied: !!brandDNA,
@@ -5618,7 +6194,7 @@ app.post('/api/studio/audio', async (req, res) => {
       case 'voiceover': {
         if (!script) return res.status(400).json({ error: 'Script required for voiceover' });
         const prompt = `[VOICEOVER] Generate natural voiceover audio.\nScript: "${script}"\nVoice: ${voice_id || 'default'}\nModel: ${voice_model || 'eleven-v3'}`;
-        result = await higgsFieldGenerate({ prompt, model: 'kling-2.6-audio', duration: 10, enhance_prompt: true });
+        result = await higgsFieldGenerate({ prompt, model: 'kling-2.1-pro', duration: 10, enhance_prompt: true });
         break;
       }
       case 'clone': {
@@ -5634,7 +6210,7 @@ app.post('/api/studio/audio', async (req, res) => {
       case 'change-voice': {
         if (!video_url) return res.status(400).json({ error: 'Video URL required' });
         const prompt = `[CHANGE VOICE] Replace the voice in this video with voice: ${voice_id || 'default'}. Maintain perfect lip synchronization.`;
-        result = await higgsFieldGenerate({ prompt, image_url: video_url, model: 'kling-2.6-audio', duration: 10, enhance_prompt: true });
+        result = await higgsFieldGenerate({ prompt, image_url: video_url, model: 'kling-2.1-pro', duration: 10, enhance_prompt: true });
         break;
       }
       case 'translate': {
@@ -5642,7 +6218,7 @@ app.post('/api/studio/audio', async (req, res) => {
         const LANGUAGES = ['en', 'zh', 'fr', 'hi', 'it', 'ja', 'ko', 'pt', 'ru', 'tr', 'es', 'ar', 'de'];
         if (!LANGUAGES.includes(target_language)) return res.status(400).json({ error: `Supported languages: ${LANGUAGES.join(', ')}` });
         const prompt = `[TRANSLATE] Translate this video to ${target_language} with automatic lip synchronization. Maintain the original speaker's tone and energy.`;
-        result = await higgsFieldGenerate({ prompt, image_url: video_url, model: 'kling-2.6-audio', duration: 10, enhance_prompt: true });
+        result = await higgsFieldGenerate({ prompt, image_url: video_url, model: 'kling-2.1-pro', duration: 10, enhance_prompt: true });
         break;
       }
     }
@@ -5685,7 +6261,7 @@ app.post('/api/studio/effects', async (req, res) => {
     if (face_swap_target) genBody.reference_image_urls = [face_swap_target];
     
     const genResult = await higgsFieldGenerate(genBody);
-    res.json({ success: true, effect: vfx, generation_id: genResult.generation_id, status_url: `/api/video/status/${genResult.generation_id}` });
+    res.json({ success: true, effect: vfx, generation_id: extractRequestId(genResult), status_url: `/api/video/status/${extractRequestId(genResult)}` });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -5708,8 +6284,8 @@ app.post('/api/studio/enhance', async (req, res) => {
     
     const prompt = `[${enhanceMode.toUpperCase()}] Enhance this media. Target: ${target_resolution || '4K'}. Apply: deflicker, stabilize, sharpen, enhance details. Maintain all original content exactly.`;
     
-    const genResult = await higgsFieldGenerate({ prompt, image_url: media_url, model: 'topaz', duration: 5, enhance_prompt: false });
-    res.json({ success: true, mode: enhanceMode, generation_id: genResult.generation_id, status_url: `/api/video/status/${genResult.generation_id}`, target_resolution: target_resolution || '4K' });
+    const genResult = await higgsFieldGenerate({ prompt, image_url: media_url, model: 'dop-standard', duration: 5, enhance_prompt: false });
+    res.json({ success: true, mode: enhanceMode, generation_id: extractRequestId(genResult), status_url: `/api/video/status/${extractRequestId(genResult)}`, target_resolution: target_resolution || '4K' });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -5728,6 +6304,7 @@ app.post('/api/studio/image', async (req, res) => {
     
     const clientName = client.fields.brand_name || email;
     const brandDNA = await loadBrandFingerprint(clientName);
+    const imgLearningCtx = await buildLearningContext(clientName);
     const brandPrefix = buildBrandPromptPrefix(brandDNA, clientName);
     
     const IMAGE_MODES = ['text-to-image', 'product-placement', 'style-copy', 'edit', 'angles', 'shots', 'upscale'];
@@ -5764,8 +6341,8 @@ app.post('/api/studio/image', async (req, res) => {
       success: true,
       mode: imgMode,
       model: selectedModel,
-      generation_id: genResult.generation_id,
-      status_url: `/api/video/status/${genResult.generation_id}`,
+      generation_id: extractRequestId(genResult),
+      status_url: `/api/video/status/${extractRequestId(genResult)}`,
       brand_dna_applied: !!brandDNA,
     });
   } catch (e) {
@@ -5785,6 +6362,7 @@ app.post('/api/studio/soul', async (req, res) => {
     
     const clientName = client.fields.brand_name || email;
     const brandDNA = await loadBrandFingerprint(clientName);
+    const soulLearningCtx = await buildLearningContext(clientName);
     
     if (action === 'create-character') {
       // Save character to brand voices table
@@ -5804,11 +6382,11 @@ app.post('/api/studio/soul', async (req, res) => {
     const brandPrefix = buildBrandPromptPrefix(brandDNA, clientName);
     const fullPrompt = `${brandPrefix}[SOUL 2.0 - Character Consistent] ${prompt || 'Generate content with this character'}`;
     
-    const genBody = { prompt: fullPrompt, model: 'kling-2.1', enhance_prompt: true, duration: 5, aspect_ratio: '9:16' };
+    const genBody = { prompt: fullPrompt, model: 'kling-2.1-pro', enhance_prompt: true, duration: 5, aspect_ratio: '9:16' };
     if (reference_images?.length) genBody.reference_image_urls = reference_images.slice(0, 5);
     
     const genResult = await higgsFieldGenerate(genBody);
-    res.json({ success: true, generation_id: genResult.generation_id, status_url: `/api/video/status/${genResult.generation_id}`, brand_dna_applied: !!brandDNA });
+    res.json({ success: true, generation_id: extractRequestId(genResult), status_url: `/api/video/status/${extractRequestId(genResult)}`, brand_dna_applied: !!brandDNA });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -5827,6 +6405,8 @@ app.post('/api/studio/motion', async (req, res) => {
     
     const clientName = client.fields.brand_name || email;
     const brandDNA = await loadBrandFingerprint(clientName);
+    const motionLearningCtx = await buildLearningContext(clientName);
+    const motionMotionDNA = await loadMotionDNA(clientName);
     const brandPrefix = buildBrandPromptPrefix(brandDNA, clientName);
     
     let motionPrompt = `${brandPrefix}${PRODUCT_PRESERVATION_PROMPT}\n\n[MOTION CONTROL]\n`;
@@ -5845,7 +6425,7 @@ app.post('/api/studio/motion', async (req, res) => {
     if (reference_images?.length) genBody.reference_image_urls = reference_images.slice(0, 5);
     
     const genResult = await higgsFieldGenerate(genBody);
-    res.json({ success: true, generation_id: genResult.generation_id, status_url: `/api/video/status/${genResult.generation_id}`, duration: genBody.duration });
+    res.json({ success: true, generation_id: extractRequestId(genResult), status_url: `/api/video/status/${extractRequestId(genResult)}`, duration: genBody.duration });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -5856,8 +6436,9 @@ app.post('/api/studio/motion', async (req, res) => {
  */
 app.delete('/api/video/cancel/:id', async (req, res) => {
   try {
-    const r = await fetch(`${HIGGSFIELD_BASE}/v1/generations/${req.params.id}`, {
-      method: 'DELETE',
+    // CORRECT cancel endpoint: POST /requests/{request_id}/cancel
+    const r = await fetch(`${HIGGSFIELD_BASE}/requests/${req.params.id}/cancel`, {
+      method: 'POST',
       headers: { 'Authorization': `Key ${HIGGSFIELD_API_KEY}:${HIGGSFIELD_API_SECRET}` },
     });
     res.json({ success: true, cancelled: req.params.id });
@@ -5879,15 +6460,17 @@ app.get('/api/studio/models', (req, res) => {
     total: models.length,
     capabilities: [...new Set(models.flatMap(m => m.capabilities || []))],
     studios: {
-      marketing: { default_model: 'seedance-2.0', description: 'Product URL → full campaign' },
-      cinema: { default_model: 'dop', description: 'Professional filmmaking controls' },
-      lipsync: { default_model: 'kling-avatars-2.0', description: 'Script → talking head' },
-      audio: { default_model: 'kling-2.6-audio', description: 'Voiceover, clone, translate' },
-      effects: { default_model: 'dop', description: '20+ VFX presets' },
-      enhance: { default_model: 'topaz', description: 'Upscale, stabilize, enhance' },
-      image: { default_model: 'nano-banana-pro', description: '4K image generation' },
-      soul: { default_model: 'kling-2.1', description: 'Character consistency' },
-      motion: { default_model: 'kling-3.0', description: 'Precise motion control' },
+      marketing: { default_model: 'seedance-pro', description: 'Product URL → full campaign' },
+      cinema: { default_model: 'dop-standard', description: 'Professional filmmaking controls' },
+      lipsync: { default_model: 'kling-2.1-pro', description: 'Script → talking head' },
+      audio: { default_model: 'kling-2.1-pro', description: 'Voiceover, clone, translate' },
+      effects: { default_model: 'dop-turbo', description: '20+ VFX presets' },
+      enhance: { default_model: 'dop-standard', description: 'Upscale, stabilize, enhance' },
+      image: { default_model: 'soul-standard', description: 'Premium image generation' },
+      seedream: { default_model: 'seedream-v4', description: '2K/4K image generation + editing' },
+      soul: { default_model: 'soul-character', description: 'Character consistency across images' },
+      motion: { default_model: 'kling-3.0-t2v', description: 'Precise motion control, text-to-video' },
+      flf: { default_model: 'dop-standard-flf', description: 'First-last-frame precise storytelling' },
     },
   });
 });
@@ -5900,38 +6483,38 @@ app.get('/api/studio/models', (req, res) => {
 
 const TEMPLATE_LIBRARY = {
   // Product Templates
-  'product-showcase': { name: 'Product Showcase', category: 'product', studio: 'marketing', mode: 'hyper-motion', model: 'seedance-2.0', aspect_ratio: '9:16', duration: 10, prompt_template: 'Cinematic product showcase with dynamic camera movements. The product rotates elegantly against a clean, minimal background. Premium lighting. {brand_style}' },
-  'product-review': { name: 'Product Review', category: 'product', studio: 'marketing', mode: 'product-review', model: 'seedance-2.0', aspect_ratio: '9:16', duration: 15, prompt_template: 'Authentic product review. A presenter examines the product up close, showing details, texture, and features. Genuine reactions. {brand_style}' },
-  'unboxing': { name: 'Unboxing Experience', category: 'product', studio: 'marketing', mode: 'unboxing', model: 'seedance-2.0', aspect_ratio: '9:16', duration: 15, prompt_template: 'Exciting unboxing video. Hands carefully open the packaging, revealing the product with genuine excitement. ASMR-quality audio. {brand_style}' },
-  'product-demo': { name: 'Product Demo', category: 'product', studio: 'marketing', mode: 'tutorial', model: 'seedance-2.0', aspect_ratio: '9:16', duration: 15, prompt_template: 'Step-by-step product demonstration. Show the product in use, highlighting key features and benefits. Clear, educational. {brand_style}' },
-  'virtual-try-on': { name: 'Virtual Try-On', category: 'product', studio: 'marketing', mode: 'virtual-try-on', model: 'seedance-2.0', aspect_ratio: '9:16', duration: 10, prompt_template: 'Street-style editorial virtual try-on. A model confidently showcases the product in a lifestyle setting. Fashion-forward energy. {brand_style}' },
-  'product-360': { name: 'Product 360° Spin', category: 'product', studio: 'cinema', model: 'dop', aspect_ratio: '1:1', duration: 5, camera_effect: 'product-hero-360', prompt_template: 'Smooth 360-degree product rotation. Clean white background. Professional studio lighting. Every angle and detail visible. {brand_style}' },
+  'product-showcase': { name: 'Product Showcase', category: 'product', studio: 'marketing', mode: 'hyper-motion', model: 'seedance-pro', aspect_ratio: '9:16', duration: 10, prompt_template: 'Cinematic product showcase with dynamic camera movements. The product rotates elegantly against a clean, minimal background. Premium lighting. {brand_style}' },
+  'product-review': { name: 'Product Review', category: 'product', studio: 'marketing', mode: 'product-review', model: 'seedance-pro', aspect_ratio: '9:16', duration: 15, prompt_template: 'Authentic product review. A presenter examines the product up close, showing details, texture, and features. Genuine reactions. {brand_style}' },
+  'unboxing': { name: 'Unboxing Experience', category: 'product', studio: 'marketing', mode: 'unboxing', model: 'seedance-pro', aspect_ratio: '9:16', duration: 15, prompt_template: 'Exciting unboxing video. Hands carefully open the packaging, revealing the product with genuine excitement. ASMR-quality audio. {brand_style}' },
+  'product-demo': { name: 'Product Demo', category: 'product', studio: 'marketing', mode: 'tutorial', model: 'seedance-pro', aspect_ratio: '9:16', duration: 15, prompt_template: 'Step-by-step product demonstration. Show the product in use, highlighting key features and benefits. Clear, educational. {brand_style}' },
+  'virtual-try-on': { name: 'Virtual Try-On', category: 'product', studio: 'marketing', mode: 'virtual-try-on', model: 'seedance-pro', aspect_ratio: '9:16', duration: 10, prompt_template: 'Street-style editorial virtual try-on. A model confidently showcases the product in a lifestyle setting. Fashion-forward energy. {brand_style}' },
+  'product-360': { name: 'Product 360° Spin', category: 'product', studio: 'cinema', model: 'dop-standard', aspect_ratio: '1:1', duration: 5, camera_effect: 'product-hero-360', prompt_template: 'Smooth 360-degree product rotation. Clean white background. Professional studio lighting. Every angle and detail visible. {brand_style}' },
   
   // UGC Templates
-  'ugc-talking-head': { name: 'UGC Talking Head', category: 'ugc', studio: 'marketing', mode: 'ugc', model: 'seedance-2.0', aspect_ratio: '9:16', duration: 15, prompt_template: 'Authentic UGC-style talking head. A real person shares their genuine experience with the product. Natural lighting, casual setting. {brand_style}' },
-  'ugc-get-ready': { name: 'Get Ready With Me', category: 'ugc', studio: 'marketing', mode: 'ugc', model: 'seedance-2.0', aspect_ratio: '9:16', duration: 15, prompt_template: 'GRWM-style content. Someone getting ready while casually incorporating the product. Mirror selfie aesthetic. Trendy, relatable. {brand_style}' },
-  'ugc-day-in-life': { name: 'Day in the Life', category: 'ugc', studio: 'cinema', model: 'kling-3.0', aspect_ratio: '9:16', duration: 10, prompt_template: 'Aesthetic day-in-the-life montage. Multiple scenes showing the product integrated into daily routine. Warm, lifestyle vibes. {brand_style}' },
+  'ugc-talking-head': { name: 'UGC Talking Head', category: 'ugc', studio: 'marketing', mode: 'ugc', model: 'seedance-pro', aspect_ratio: '9:16', duration: 15, prompt_template: 'Authentic UGC-style talking head. A real person shares their genuine experience with the product. Natural lighting, casual setting. {brand_style}' },
+  'ugc-get-ready': { name: 'Get Ready With Me', category: 'ugc', studio: 'marketing', mode: 'ugc', model: 'seedance-pro', aspect_ratio: '9:16', duration: 15, prompt_template: 'GRWM-style content. Someone getting ready while casually incorporating the product. Mirror selfie aesthetic. Trendy, relatable. {brand_style}' },
+  'ugc-day-in-life': { name: 'Day in the Life', category: 'ugc', studio: 'cinema', model: 'kling-3.0-t2v', aspect_ratio: '9:16', duration: 10, prompt_template: 'Aesthetic day-in-the-life montage. Multiple scenes showing the product integrated into daily routine. Warm, lifestyle vibes. {brand_style}' },
   
   // Ad Templates
-  'tv-spot': { name: 'TV Commercial', category: 'ad', studio: 'marketing', mode: 'tv-spot', model: 'sora-2', aspect_ratio: '16:9', duration: 15, prompt_template: 'Cinematic TV commercial. Full narrative arc: hook, problem, solution (the product), happy ending. Broadcast quality. {brand_style}' },
-  'story-ad': { name: 'Story/Reel Ad', category: 'ad', studio: 'cinema', model: 'dop', aspect_ratio: '9:16', duration: 10, prompt_template: 'Scroll-stopping story ad. First frame grabs attention immediately. Product front and center. Bold text overlay. Urgency. {brand_style}' },
-  'carousel-ad': { name: 'Carousel Ad Set', category: 'ad', studio: 'image', model: 'nano-banana-pro', aspect_ratio: '1:1', prompt_template: 'Premium carousel ad slide. Clean design, bold typography, product hero shot. Each slide tells part of the story. {brand_style}' },
+  'tv-spot': { name: 'TV Commercial', category: 'ad', studio: 'marketing', mode: 'tv-spot', model: 'kling-3.0-t2v', aspect_ratio: '16:9', duration: 15, prompt_template: 'Cinematic TV commercial. Full narrative arc: hook, problem, solution (the product), happy ending. Broadcast quality. {brand_style}' },
+  'story-ad': { name: 'Story/Reel Ad', category: 'ad', studio: 'cinema', model: 'dop-standard', aspect_ratio: '9:16', duration: 10, prompt_template: 'Scroll-stopping story ad. First frame grabs attention immediately. Product front and center. Bold text overlay. Urgency. {brand_style}' },
+  'carousel-ad': { name: 'Carousel Ad Set', category: 'ad', studio: 'image', model: 'soul-standard', aspect_ratio: '1:1', prompt_template: 'Premium carousel ad slide. Clean design, bold typography, product hero shot. Each slide tells part of the story. {brand_style}' },
   
   // Social Templates
-  'trending-hook': { name: 'Trending Hook', category: 'social', studio: 'cinema', model: 'kling-2.5-turbo', aspect_ratio: '9:16', duration: 5, camera_effect: 'snap-zoom', prompt_template: 'Attention-grabbing first 3 seconds. Quick cuts, dynamic camera, bold movement. Hook viewers immediately. {brand_style}' },
-  'behind-scenes': { name: 'Behind the Scenes', category: 'social', studio: 'cinema', model: 'kling-2.1', aspect_ratio: '9:16', duration: 10, camera_effect: 'steadicam-follow', prompt_template: 'Authentic behind-the-scenes content. Show the process, the workspace, the making of the product. Raw, real, relatable. {brand_style}' },
-  'aesthetic-flat-lay': { name: 'Aesthetic Flat Lay', category: 'social', studio: 'cinema', model: 'dop', aspect_ratio: '1:1', duration: 5, camera_effect: 'flat-lay-scan', prompt_template: 'Beautiful flat lay arrangement. Products artfully arranged with complementary props. Top-down camera slowly scans the scene. {brand_style}' },
-  'before-after': { name: 'Before & After', category: 'social', studio: 'cinema', model: 'dop', aspect_ratio: '9:16', duration: 5, camera_effect: 'before-after-split', prompt_template: 'Dramatic before and after reveal. Split screen showing transformation. Clean transition. Impactful. {brand_style}' },
+  'trending-hook': { name: 'Trending Hook', category: 'social', studio: 'cinema', model: 'kling-2.1-standard', aspect_ratio: '9:16', duration: 5, camera_effect: 'snap-zoom', prompt_template: 'Attention-grabbing first 3 seconds. Quick cuts, dynamic camera, bold movement. Hook viewers immediately. {brand_style}' },
+  'behind-scenes': { name: 'Behind the Scenes', category: 'social', studio: 'cinema', model: 'kling-2.1-pro', aspect_ratio: '9:16', duration: 10, camera_effect: 'steadicam-follow', prompt_template: 'Authentic behind-the-scenes content. Show the process, the workspace, the making of the product. Raw, real, relatable. {brand_style}' },
+  'aesthetic-flat-lay': { name: 'Aesthetic Flat Lay', category: 'social', studio: 'cinema', model: 'dop-standard', aspect_ratio: '1:1', duration: 5, camera_effect: 'flat-lay-scan', prompt_template: 'Beautiful flat lay arrangement. Products artfully arranged with complementary props. Top-down camera slowly scans the scene. {brand_style}' },
+  'before-after': { name: 'Before & After', category: 'social', studio: 'cinema', model: 'dop-standard', aspect_ratio: '9:16', duration: 5, camera_effect: 'before-after-split', prompt_template: 'Dramatic before and after reveal. Split screen showing transformation. Clean transition. Impactful. {brand_style}' },
   
   // Brand Templates
-  'brand-story': { name: 'Brand Story', category: 'brand', studio: 'cinema', model: 'sora-2', aspect_ratio: '16:9', duration: 15, genre: 'intimate', prompt_template: 'Emotional brand story. Cinematic quality. Show the brand\'s values, mission, and the people behind it. Heartfelt and authentic. {brand_style}' },
-  'founder-message': { name: 'Founder Message', category: 'brand', studio: 'lipsync', model: 'kling-avatars-2.0', aspect_ratio: '9:16', duration: 15, prompt_template: 'Founder/brand ambassador delivers a personal message to the audience. Professional but warm. Builds trust and connection. {brand_style}' },
-  'testimonial': { name: 'Customer Testimonial', category: 'brand', studio: 'lipsync', model: 'kling-avatars-2.0', aspect_ratio: '9:16', duration: 15, prompt_template: 'Happy customer sharing their experience. Natural, unscripted feel. Genuine smile and enthusiasm. {brand_style}' },
+  'brand-story': { name: 'Brand Story', category: 'brand', studio: 'cinema', model: 'kling-3.0-t2v', aspect_ratio: '16:9', duration: 15, genre: 'intimate', prompt_template: 'Emotional brand story. Cinematic quality. Show the brand\'s values, mission, and the people behind it. Heartfelt and authentic. {brand_style}' },
+  'founder-message': { name: 'Founder Message', category: 'brand', studio: 'lipsync', model: 'kling-2.1-pro', aspect_ratio: '9:16', duration: 15, prompt_template: 'Founder/brand ambassador delivers a personal message to the audience. Professional but warm. Builds trust and connection. {brand_style}' },
+  'testimonial': { name: 'Customer Testimonial', category: 'brand', studio: 'lipsync', model: 'kling-2.1-pro', aspect_ratio: '9:16', duration: 15, prompt_template: 'Happy customer sharing their experience. Natural, unscripted feel. Genuine smile and enthusiasm. {brand_style}' },
   
   // Seasonal Templates
-  'sale-promo': { name: 'Sale/Promo', category: 'seasonal', studio: 'cinema', model: 'dop', aspect_ratio: '9:16', duration: 5, camera_effect: 'pulse', prompt_template: 'High-energy sale promotion. Bold graphics, flashing prices, urgency elements. Products cycling through. FOMO energy. {brand_style}' },
-  'holiday-special': { name: 'Holiday Special', category: 'seasonal', studio: 'marketing', mode: 'hyper-motion', model: 'seedance-2.0', aspect_ratio: '9:16', duration: 10, prompt_template: 'Festive holiday content. Products presented in a seasonal setting with appropriate decorations. Warm, celebratory mood. {brand_style}' },
-  'new-arrival': { name: 'New Arrival', category: 'seasonal', studio: 'cinema', model: 'sora-2', aspect_ratio: '9:16', duration: 10, camera_effect: 'product-reveal', prompt_template: 'Dramatic new product reveal. Build anticipation, then reveal the product in all its glory. Premium, exciting. {brand_style}' },
+  'sale-promo': { name: 'Sale/Promo', category: 'seasonal', studio: 'cinema', model: 'dop-standard', aspect_ratio: '9:16', duration: 5, camera_effect: 'pulse', prompt_template: 'High-energy sale promotion. Bold graphics, flashing prices, urgency elements. Products cycling through. FOMO energy. {brand_style}' },
+  'holiday-special': { name: 'Holiday Special', category: 'seasonal', studio: 'marketing', mode: 'hyper-motion', model: 'seedance-pro', aspect_ratio: '9:16', duration: 10, prompt_template: 'Festive holiday content. Products presented in a seasonal setting with appropriate decorations. Warm, celebratory mood. {brand_style}' },
+  'new-arrival': { name: 'New Arrival', category: 'seasonal', studio: 'cinema', model: 'kling-3.0-t2v', aspect_ratio: '9:16', duration: 10, camera_effect: 'product-reveal', prompt_template: 'Dramatic new product reveal. Build anticipation, then reveal the product in all its glory. Premium, exciting. {brand_style}' },
 };
 
 /**
@@ -5968,10 +6551,16 @@ app.post('/api/templates/generate', async (req, res) => {
     const brandPrefix = buildBrandPromptPrefix(brandDNA, clientName);
     
     // Fill template with brand style
+    // ━━ LEARNING + MOTION DNA ━━
+    const learningCtx = await buildLearningContext(clientName);
+    const motionDNA = await loadMotionDNA(clientName);
+    const motionFragment = motionDNA?.fragments?.length ? motionDNA.fragments[Math.floor(Math.random() * motionDNA.fragments.length)] : '';
+    
     let finalPrompt = template.prompt_template.replace('{brand_style}', brandDNA ? `Brand DNA: ${JSON.stringify(brandDNA)}` : 'Professional, premium quality');
     if (product_name) finalPrompt = `Product: ${product_name}\n${product_description || ''}\n\n${finalPrompt}`;
     if (custom_prompt) finalPrompt += `\n\nAdditional direction: ${custom_prompt}`;
-    finalPrompt = `${brandPrefix}${PRODUCT_PRESERVATION_PROMPT}\n\n${finalPrompt}`;
+    if (motionFragment) finalPrompt += `\nMotion direction: ${motionFragment}`;
+    finalPrompt = `${brandPrefix}${PRODUCT_PRESERVATION_PROMPT}${learningCtx}${motionDNA?.context || ''}\n\n${finalPrompt}`;
     
     const genBody = {
       prompt: finalPrompt,
@@ -5990,8 +6579,8 @@ app.post('/api/templates/generate', async (req, res) => {
       success: true,
       template: template_id,
       template_name: template.name,
-      generation_id: genResult.generation_id,
-      status_url: `/api/video/status/${genResult.generation_id}`,
+      generation_id: extractRequestId(genResult),
+      status_url: `/api/video/status/${extractRequestId(genResult)}`,
       model: genBody.model,
       brand_dna_applied: !!brandDNA,
       product_preservation: true,
@@ -6001,6 +6590,694 @@ app.post('/api/templates/generate', async (req, res) => {
   }
 });
 
+
+
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  CAPCUT-STYLE VIDEO EDIT TEMPLATES
+//  Trending edit styles, transitions, effects, music sync — users apply to finished videos
+//  Full CapCut equivalent: velocity edits, beat drops, text reveals, montages, etc.
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+const VIDEO_EDIT_TEMPLATES = {
+  // ─── VELOCITY EDITS (Speed Ramping) ───
+  'velocity-smooth-ramp': {
+    name: 'Smooth Speed Ramp',
+    category: 'velocity',
+    difficulty: 'beginner',
+    trending_score: 95,
+    description: 'Gradual speed up → freeze frame → smooth slow-mo resume. The TikTok classic.',
+    keyframes: [
+      { time: 0, speed: 1.0, ease: 'linear' },
+      { time: 0.3, speed: 2.5, ease: 'ease-in' },
+      { time: 0.5, speed: 0.0, ease: 'snap', effect: 'freeze-frame', duration: 0.3 },
+      { time: 0.8, speed: 0.3, ease: 'ease-out' },
+      { time: 1.0, speed: 1.0, ease: 'ease-in-out' },
+    ],
+    audio_sync: { beat_aligned: true, freeze_on_drop: true },
+    tags: ['trending', 'fashion', 'reveal', 'product'],
+  },
+  'velocity-whip-pan': {
+    name: 'Whip Pan Speed',
+    category: 'velocity',
+    difficulty: 'intermediate',
+    trending_score: 88,
+    description: 'Fast whip between scenes with motion blur + speed ramp on the snap.',
+    keyframes: [
+      { time: 0, speed: 1.0 },
+      { time: 0.4, speed: 4.0, ease: 'ease-in', effect: 'motion-blur', intensity: 0.8 },
+      { time: 0.5, speed: 0.5, ease: 'snap', effect: 'scene-cut' },
+      { time: 0.7, speed: 1.0, ease: 'ease-out' },
+    ],
+    audio_sync: { beat_aligned: true, whoosh_on_whip: true },
+    tags: ['transition', 'dynamic', 'outfit-change'],
+  },
+  'velocity-bass-drop': {
+    name: 'Bass Drop Freeze',
+    category: 'velocity',
+    difficulty: 'beginner',
+    trending_score: 92,
+    description: 'Normal speed → bass hits → freeze → slow-mo explosion. Music video energy.',
+    keyframes: [
+      { time: 0, speed: 1.0 },
+      { time: 0.45, speed: 1.2, ease: 'ease-in' },
+      { time: 0.5, speed: 0.0, effect: 'freeze-frame', duration: 0.5, zoom: 1.15 },
+      { time: 0.55, speed: 0.2, ease: 'ease-out', effect: 'shake', intensity: 0.3 },
+      { time: 0.8, speed: 0.5, ease: 'ease-in-out' },
+      { time: 1.0, speed: 1.0 },
+    ],
+    audio_sync: { beat_aligned: true, freeze_on_drop: true, bass_boost: true },
+    tags: ['music-video', 'fashion', 'hype', 'reveal'],
+  },
+  'velocity-strobe': {
+    name: 'Strobe Flash Edit',
+    category: 'velocity',
+    difficulty: 'advanced',
+    trending_score: 85,
+    description: 'Rapid alternating speed (fast/freeze/fast/freeze) with flash transitions. Editorial energy.',
+    keyframes: [
+      { time: 0, speed: 3.0, effect: 'flash', color: '#FFFFFF' },
+      { time: 0.1, speed: 0.0, effect: 'freeze-frame', duration: 0.15 },
+      { time: 0.25, speed: 3.0, effect: 'flash' },
+      { time: 0.35, speed: 0.0, effect: 'freeze-frame', duration: 0.15 },
+      { time: 0.5, speed: 2.0, effect: 'flash' },
+      { time: 0.65, speed: 0.3, ease: 'ease-out' },
+      { time: 1.0, speed: 1.0 },
+    ],
+    audio_sync: { beat_aligned: true, flash_on_beat: true },
+    tags: ['editorial', 'fashion', 'high-energy', 'runway'],
+  },
+
+  // ─── TRANSITIONS ───
+  'transition-outfit-change': {
+    name: 'Outfit Change Snap',
+    category: 'transition',
+    difficulty: 'intermediate',
+    trending_score: 97,
+    description: 'Hand covers camera → snap → new outfit. The #1 fashion transition on TikTok.',
+    keyframes: [
+      { time: 0, speed: 1.0 },
+      { time: 0.45, speed: 1.5, ease: 'ease-in' },
+      { time: 0.5, effect: 'hand-cover-cut', duration: 0.08, zoom: 1.3, blur: 15 },
+      { time: 0.58, speed: 0.5, ease: 'ease-out', zoom: 1.0 },
+      { time: 1.0, speed: 1.0 },
+    ],
+    instructions: 'Model raises hand toward camera at cut point. Second clip starts from same position in new outfit.',
+    audio_sync: { snap_sound: true, beat_aligned: true },
+    tags: ['fashion', 'outfit', 'trending', 'transformation'],
+  },
+  'transition-zoom-through': {
+    name: 'Zoom Through Portal',
+    category: 'transition',
+    difficulty: 'intermediate',
+    trending_score: 90,
+    description: 'Camera zooms into an object → through it → into next scene. Seamless.',
+    keyframes: [
+      { time: 0, speed: 1.0, zoom: 1.0 },
+      { time: 0.3, zoom: 3.0, ease: 'ease-in', speed: 1.5 },
+      { time: 0.5, zoom: 8.0, effect: 'blur-transition', blur: 20 },
+      { time: 0.6, zoom: 3.0, ease: 'ease-out', speed: 1.0 },
+      { time: 0.8, zoom: 1.0, ease: 'ease-out' },
+    ],
+    instructions: 'First clip: camera pushes into a dark/solid area. Second clip: camera pulls back from matching area.',
+    tags: ['creative', 'product-reveal', 'storytelling'],
+  },
+  'transition-spin': {
+    name: 'Spin Transition',
+    category: 'transition',
+    difficulty: 'beginner',
+    trending_score: 86,
+    description: 'Camera spins 360° between scenes. Clean, energetic, works for everything.',
+    keyframes: [
+      { time: 0, speed: 1.0, rotation: 0 },
+      { time: 0.4, speed: 2.0, ease: 'ease-in' },
+      { time: 0.5, rotation: 360, effect: 'motion-blur', intensity: 0.6 },
+      { time: 0.6, speed: 0.8, ease: 'ease-out' },
+      { time: 1.0, speed: 1.0 },
+    ],
+    audio_sync: { whoosh_on_spin: true },
+    tags: ['energetic', 'versatile', 'product', 'travel'],
+  },
+  'transition-glitch': {
+    name: 'Glitch Cut',
+    category: 'transition',
+    difficulty: 'beginner',
+    trending_score: 89,
+    description: 'Digital glitch distortion between scenes. Edgy, modern, cyberpunk energy.',
+    keyframes: [
+      { time: 0, speed: 1.0 },
+      { time: 0.45, effect: 'rgb-split', intensity: 0.5 },
+      { time: 0.48, effect: 'scanlines', intensity: 0.8 },
+      { time: 0.5, effect: 'pixel-sort', duration: 0.1 },
+      { time: 0.55, effect: 'rgb-split', intensity: 0.3 },
+      { time: 0.6, speed: 1.0 },
+    ],
+    audio_sync: { glitch_sound: true },
+    tags: ['edgy', 'tech', 'streetwear', 'gaming'],
+  },
+  'transition-morph': {
+    name: 'Smooth Morph',
+    category: 'transition',
+    difficulty: 'advanced',
+    trending_score: 82,
+    description: 'One subject morphs/dissolves into another. Premium editorial feel.',
+    keyframes: [
+      { time: 0, speed: 1.0 },
+      { time: 0.4, speed: 0.5, ease: 'ease-in' },
+      { time: 0.5, effect: 'cross-dissolve', duration: 0.3, blend_mode: 'soft-light' },
+      { time: 0.7, speed: 1.0, ease: 'ease-out' },
+    ],
+    tags: ['editorial', 'premium', 'beauty', 'luxury'],
+  },
+
+  // ─── BEAT SYNC / MUSIC TEMPLATES ───
+  'beat-sync-hard-cuts': {
+    name: 'Hard Cut Beat Sync',
+    category: 'beat-sync',
+    difficulty: 'beginner',
+    trending_score: 94,
+    description: 'Every beat = hard cut to new shot. Simple, effective, maximum impact.',
+    structure: {
+      cuts_per_beat: 1,
+      cut_style: 'hard',
+      shot_duration: 'beat-length',
+      recommended_bpm: [90, 120, 140],
+    },
+    instructions: 'Cut clips to exact beat timing. Each shot should be a distinct angle/product/pose.',
+    tags: ['music-video', 'montage', 'product', 'fashion'],
+  },
+  'beat-sync-half-beat': {
+    name: 'Double-Time Beat Sync',
+    category: 'beat-sync',
+    difficulty: 'intermediate',
+    trending_score: 91,
+    description: 'Cuts on every half-beat for high-energy montage. Fashion show energy.',
+    structure: {
+      cuts_per_beat: 2,
+      cut_style: 'hard',
+      speed_variation: [1.0, 0.5, 2.0, 1.0],
+      recommended_bpm: [100, 130],
+    },
+    tags: ['high-energy', 'fashion', 'montage', 'runway'],
+  },
+  'beat-sync-buildup-drop': {
+    name: 'Build Up → Drop',
+    category: 'beat-sync',
+    difficulty: 'intermediate',
+    trending_score: 96,
+    description: 'Slow pacing during verse → rapid cuts on buildup → epic reveal on drop. THE viral formula.',
+    structure: {
+      verse: { speed: 1.0, cuts_per_beat: 0.5, style: 'slow-dissolve' },
+      buildup: { speed: 1.5, cuts_per_beat: 2, style: 'hard-cut', zoom: 'progressive' },
+      drop: { speed: 0.3, effect: 'freeze-then-slowmo', shake: true, zoom: 1.2 },
+      post_drop: { speed: 1.0, cuts_per_beat: 1 },
+    },
+    instructions: 'Verse: slow, atmospheric shots. Buildup: rapid cuts getting faster. Drop: THE reveal moment.',
+    tags: ['viral', 'reveal', 'product-launch', 'hype'],
+  },
+
+  // ─── TEXT & OVERLAY TEMPLATES ───
+  'text-typewriter': {
+    name: 'Typewriter Text',
+    category: 'text-overlay',
+    difficulty: 'beginner',
+    trending_score: 83,
+    description: 'Text types on screen character by character. Clean, engaging, readable.',
+    text_animation: {
+      entrance: 'typewriter',
+      speed: 'medium',
+      cursor: true,
+      font_style: 'mono',
+      position: 'center',
+    },
+    tags: ['storytelling', 'educational', 'pov', 'relatable'],
+  },
+  'text-kinetic': {
+    name: 'Kinetic Typography',
+    category: 'text-overlay',
+    difficulty: 'advanced',
+    trending_score: 87,
+    description: 'Words fly in, scale, rotate in sync with voiceover. TED-talk meets TikTok.',
+    text_animation: {
+      entrance: 'fly-in-word-by-word',
+      emphasis: 'scale-on-keyword',
+      exit: 'fly-out',
+      sync: 'voiceover',
+      font_style: 'bold-sans',
+    },
+    tags: ['educational', 'motivational', 'brand-story', 'explainer'],
+  },
+  'text-pop-on-beat': {
+    name: 'Pop on Beat',
+    category: 'text-overlay',
+    difficulty: 'intermediate',
+    trending_score: 90,
+    description: 'Text pops/bounces onto screen synced to music beats. Energetic, fun.',
+    text_animation: {
+      entrance: 'scale-bounce',
+      timing: 'beat-synced',
+      scale_from: 0,
+      scale_to: 1.1,
+      overshoot: true,
+      exit: 'fade-out',
+    },
+    tags: ['fun', 'product-features', 'sale', 'announcement'],
+  },
+
+  // ─── MONTAGE / SLIDESHOW TEMPLATES ───
+  'montage-photo-to-video': {
+    name: 'Photo Carousel → Video',
+    category: 'montage',
+    difficulty: 'beginner',
+    trending_score: 93,
+    description: 'Static photos come alive with Ken Burns motion + beat-synced transitions. Product showcase gold.',
+    structure: {
+      photos_per_sequence: 5,
+      motion: 'ken-burns',
+      zoom_range: [1.0, 1.3],
+      pan_speed: 'slow',
+      transition: 'swipe-left',
+      transition_duration: 0.3,
+      audio: 'trending-track',
+    },
+    tags: ['product', 'portfolio', 'before-after', 'collection'],
+  },
+  'montage-day-aesthetic': {
+    name: 'Aesthetic Day Montage',
+    category: 'montage',
+    difficulty: 'beginner',
+    trending_score: 91,
+    description: 'Warm-toned clips with smooth transitions. "That girl" aesthetic. Lifestyle gold.',
+    structure: {
+      clip_duration: [2, 4],
+      color_grade: 'warm-film',
+      grain: 0.15,
+      transition: 'smooth-dissolve',
+      speed: [0.8, 1.0],
+      audio: 'lofi-chill',
+    },
+    color_grading: { temperature: 'warm', contrast: 'low', saturation: 0.85, grain: 0.15, fade: 0.1 },
+    tags: ['aesthetic', 'lifestyle', 'daily-vlog', 'warm'],
+  },
+  'montage-product-hero': {
+    name: 'Product Hero Reel',
+    category: 'montage',
+    difficulty: 'intermediate',
+    trending_score: 94,
+    description: 'Multiple angles of one product with cinematic transitions. E-commerce essential.',
+    structure: {
+      shots: ['hero-wide', 'detail-close', 'texture-macro', 'in-use', 'hero-angle-2'],
+      transition: 'smooth-zoom',
+      speed_curve: [0.8, 1.0, 0.5, 1.2, 0.8],
+      text_overlays: ['product-name', 'key-feature', 'price-cta'],
+      audio: 'trending-upbeat',
+    },
+    tags: ['e-commerce', 'product', 'shopify', 'conversion'],
+  },
+
+  // ─── COLOR GRADING PRESETS ───
+  'grade-film-vintage': {
+    name: 'Vintage Film Look',
+    category: 'color-grade',
+    difficulty: 'beginner',
+    trending_score: 88,
+    description: 'Warm tones, lifted blacks, subtle grain. 35mm film nostalgia.',
+    grading: { temperature: 6800, tint: 5, contrast: -10, highlights: -15, shadows: 15, whites: -10, blacks: 10, saturation: -12, grain: 0.2, vignette: 0.15 },
+    lut_name: 'vintage-kodak',
+    tags: ['aesthetic', 'warm', 'nostalgic', 'fashion'],
+  },
+  'grade-clean-commercial': {
+    name: 'Clean Commercial',
+    category: 'color-grade',
+    difficulty: 'beginner',
+    trending_score: 86,
+    description: 'Bright, clean, slightly desaturated. Product photography standard.',
+    grading: { temperature: 5600, contrast: 5, highlights: -5, shadows: 10, saturation: -5, clarity: 10, grain: 0, vignette: 0 },
+    lut_name: 'clean-commercial',
+    tags: ['product', 'commercial', 'clean', 'bright'],
+  },
+  'grade-moody-editorial': {
+    name: 'Moody Editorial',
+    category: 'color-grade',
+    difficulty: 'intermediate',
+    trending_score: 84,
+    description: 'Crushed blacks, teal shadows, desaturated midtones. Magazine editorial feel.',
+    grading: { temperature: 5200, tint: -5, contrast: 20, highlights: -20, shadows: -25, saturation: -20, split_toning: { shadows: '#1a3a4a', highlights: '#d4a574' }, grain: 0.1, vignette: 0.2 },
+    lut_name: 'moody-editorial',
+    tags: ['editorial', 'moody', 'fashion', 'luxury'],
+  },
+  'grade-neon-night': {
+    name: 'Neon Night',
+    category: 'color-grade',
+    difficulty: 'intermediate',
+    trending_score: 82,
+    description: 'Boosted neons, deep shadows, cyberpunk. Nightlife and streetwear energy.',
+    grading: { temperature: 4500, contrast: 25, highlights: 10, shadows: -30, saturation: 20, vibrance: 30, split_toning: { shadows: '#0a0a2a', highlights: '#ff00ff' }, grain: 0.05 },
+    lut_name: 'neon-night',
+    tags: ['nightlife', 'streetwear', 'neon', 'edgy'],
+  },
+
+  // ─── TRENDING FORMATS ───
+  'format-pov': {
+    name: 'POV: [Situation]',
+    category: 'trending-format',
+    difficulty: 'beginner',
+    trending_score: 93,
+    description: 'First-person perspective storytelling. "POV: you just unboxed your order" format.',
+    structure: {
+      opening: 'POV text overlay (2s)',
+      body: 'First-person camera perspective',
+      pacing: 'natural-to-fast',
+      text_position: 'top-center',
+      camera: 'handheld-pov',
+    },
+    prompt_template: 'POV: {scenario}. First-person camera perspective, natural handheld movement, authentic reactions. {brand_style}',
+    tags: ['pov', 'relatable', 'storytelling', 'viral'],
+  },
+  'format-asmr-unbox': {
+    name: 'ASMR Unboxing',
+    category: 'trending-format',
+    difficulty: 'beginner',
+    trending_score: 89,
+    description: 'Close-up product handling with satisfying sounds. No music, pure ASMR.',
+    structure: {
+      audio: 'natural-asmr-only',
+      camera: 'macro-close-up',
+      lighting: 'soft-diffused',
+      speed: [0.8, 1.0],
+      focus: 'rack-focus-on-details',
+    },
+    prompt_template: 'ASMR unboxing experience. Extreme close-up, soft lighting, satisfying sounds of packaging. Fingers carefully reveal the product. {brand_style}',
+    tags: ['asmr', 'unboxing', 'product', 'satisfying'],
+  },
+  'format-transition-challenge': {
+    name: 'Transition Challenge',
+    category: 'trending-format',
+    difficulty: 'intermediate',
+    trending_score: 91,
+    description: 'Snap/clap/jump transitions between looks. Outfit/location/product change challenge format.',
+    structure: {
+      segments: 4,
+      transition_trigger: 'snap-or-jump',
+      speed_on_transition: 3.0,
+      speed_on_reveal: 0.5,
+      audio: 'trending-with-drops',
+    },
+    prompt_template: 'Quick transition challenge. {segments} looks/products, snap transition between each. Confident energy, direct to camera. {brand_style}',
+    tags: ['challenge', 'transformation', 'fashion', 'viral'],
+  },
+  'format-split-screen-react': {
+    name: 'Split Screen React',
+    category: 'trending-format',
+    difficulty: 'intermediate',
+    trending_score: 85,
+    description: 'Side-by-side comparison or reaction format. Before/after, competitor vs yours, etc.',
+    structure: {
+      layout: 'vertical-split',
+      split_ratio: '50:50',
+      sync: true,
+      text_labels: ['Before', 'After'],
+      highlight_winner: true,
+    },
+    tags: ['comparison', 'before-after', 'react', 'educational'],
+  },
+  'format-three-reasons': {
+    name: '3 Reasons Why...',
+    category: 'trending-format',
+    difficulty: 'beginner',
+    trending_score: 92,
+    description: 'Listicle format: 3 reasons with kinetic text + product shots. Educational + conversion.',
+    structure: {
+      segments: 3,
+      text_style: 'numbered-pop-in',
+      transition: 'swipe-up',
+      duration_per_point: [3, 4],
+      cta_at_end: true,
+      audio: 'upbeat-trending',
+    },
+    prompt_template: '3 reasons why {product_name} is a must-have. Each reason shown with the product in action. Energetic, convincing. {brand_style}',
+    tags: ['listicle', 'educational', 'conversion', 'product'],
+  },
+  'format-get-ready': {
+    name: 'GRWM Aesthetic',
+    category: 'trending-format',
+    difficulty: 'beginner',
+    trending_score: 95,
+    description: 'Get Ready With Me format with product integration. Most engaging format for beauty/fashion.',
+    structure: {
+      camera: 'mirror-selfie-or-tripod',
+      pacing: 'relaxed-with-speed-ups',
+      speed_curve: [1.0, 2.0, 1.0, 2.0, 0.8],
+      audio: 'trending-chill',
+      text_overlays: ['product-callouts'],
+      color_grade: 'warm-soft',
+    },
+    prompt_template: 'GRWM: getting ready using {product_name}. Mirror/vanity setup, warm lighting, relaxed energy with product callouts. {brand_style}',
+    tags: ['grwm', 'beauty', 'fashion', 'lifestyle', 'routine'],
+  },
+};
+
+// Community template store (in-memory, upgraded to DB in Phase 2)
+const communityTemplates = new Map();
+
+/**
+ * GET /api/templates/video-edits — Browse CapCut-style video edit templates
+ * Filterable by category, difficulty, tags, trending
+ */
+app.get('/api/templates/video-edits', (req, res) => {
+  const { category, difficulty, tag, sort_by, limit: lim } = req.query;
+  
+  let templates = Object.entries(VIDEO_EDIT_TEMPLATES).map(([id, data]) => ({ id, ...data }));
+  
+  if (category) templates = templates.filter(t => t.category === category);
+  if (difficulty) templates = templates.filter(t => t.difficulty === difficulty);
+  if (tag) templates = templates.filter(t => t.tags?.includes(tag));
+  
+  // Sort options
+  if (sort_by === 'trending') {
+    templates.sort((a, b) => (b.trending_score || 0) - (a.trending_score || 0));
+  } else if (sort_by === 'difficulty') {
+    const order = { beginner: 0, intermediate: 1, advanced: 2 };
+    templates.sort((a, b) => (order[a.difficulty] || 0) - (order[b.difficulty] || 0));
+  }
+  
+  if (lim) templates = templates.slice(0, parseInt(lim));
+  
+  const categories = [...new Set(Object.values(VIDEO_EDIT_TEMPLATES).map(t => t.category))];
+  const allTags = [...new Set(Object.values(VIDEO_EDIT_TEMPLATES).flatMap(t => t.tags || []))].sort();
+  
+  res.json({
+    templates,
+    total: templates.length,
+    categories,
+    available_tags: allTags,
+    difficulties: ['beginner', 'intermediate', 'advanced'],
+  });
+});
+
+/**
+ * GET /api/templates/video-edits/:id — Get a specific video edit template with full details
+ */
+app.get('/api/templates/video-edits/:id', (req, res) => {
+  const template = VIDEO_EDIT_TEMPLATES[req.params.id];
+  if (!template) {
+    return res.status(404).json({ error: 'Template not found', available: Object.keys(VIDEO_EDIT_TEMPLATES) });
+  }
+  res.json({ id: req.params.id, ...template });
+});
+
+/**
+ * POST /api/templates/video-edits/apply — Apply a video edit template to generate content
+ * Takes a template + product/brand context → generates Higgsfield video with that edit style
+ */
+app.post('/api/templates/video-edits/apply', async (req, res) => {
+  try {
+    const { email, hash, template_id, product_images, product_name, product_description,
+            custom_prompt, model_override, duration, aspect_ratio, scenario } = req.body;
+    const client = await verifyClient(email, hash);
+    if (!client) return res.status(401).json({ error: 'Invalid credentials' });
+    
+    const template = VIDEO_EDIT_TEMPLATES[template_id];
+    if (!template) return res.status(404).json({ error: 'Template not found', available: Object.keys(VIDEO_EDIT_TEMPLATES) });
+    
+    const clientName = client.fields.brand_name || email;
+    const brandDNA = await loadBrandFingerprint(clientName);
+    const brandPrefix = buildBrandPromptPrefix(brandDNA, clientName);
+    
+    // ━━ LEARNING + MOTION DNA ━━
+    const learningCtx = await buildLearningContext(clientName);
+    const motionDNA = await loadMotionDNA(clientName);
+    
+    // Build edit-specific prompt
+    let editPrompt = `${brandPrefix}${PRODUCT_PRESERVATION_PROMPT}`;
+    editPrompt += learningCtx;
+    if (motionDNA?.context) editPrompt += motionDNA.context;
+    editPrompt += `\n\nVIDEO EDIT STYLE: ${template.name} — ${template.description}`;
+    
+    // Add template-specific instructions
+    if (template.keyframes) {
+      editPrompt += `\nPacing: ${template.keyframes.map(k => `${Math.round(k.time*100)}%: speed=${k.speed || 1}x${k.effect ? ` [${k.effect}]` : ''}`).join(' → ')}`;
+    }
+    if (template.structure) {
+      editPrompt += `\nStructure: ${JSON.stringify(template.structure)}`;
+    }
+    if (template.color_grading) {
+      editPrompt += `\nColor grade: ${template.category === 'color-grade' ? JSON.stringify(template.grading) : JSON.stringify(template.color_grading)}`;
+    }
+    if (template.instructions) {
+      editPrompt += `\nDirector notes: ${template.instructions}`;
+    }
+    if (template.prompt_template) {
+      let filled = template.prompt_template
+        .replace('{brand_style}', brandDNA ? `Brand DNA: ${JSON.stringify(brandDNA)}` : 'Professional, premium')
+        .replace('{product_name}', product_name || 'the product')
+        .replace('{scenario}', scenario || 'using this product for the first time')
+        .replace('{segments}', template.structure?.segments?.toString() || '3');
+      editPrompt += `\n\n${filled}`;
+    }
+    
+    if (product_name) editPrompt += `\nProduct: ${product_name}`;
+    if (product_description) editPrompt += `\nDescription: ${product_description}`;
+    if (custom_prompt) editPrompt += `\n\nAdditional direction: ${custom_prompt}`;
+    
+    // Select best model for the edit type
+    const modelForCategory = {
+      'velocity': 'seedance-pro',
+      'transition': 'seedance-pro',
+      'beat-sync': 'seedance-pro',
+      'text-overlay': 'dop-standard',
+      'montage': 'kling-3.0-t2v',
+      'color-grade': 'dop-standard',
+      'trending-format': 'seedance-pro',
+    };
+    
+    const selectedModel = model_override || modelForCategory[template.category] || 'seedance-pro';
+    
+    const genBody = {
+      prompt: editPrompt,
+      model: selectedModel,
+      duration: duration || template.structure?.duration_per_point?.[1] ? (template.structure?.segments || 3) * (template.structure?.duration_per_point?.[1] || 3) : 10,
+      aspect_ratio: aspect_ratio || '9:16',
+      enhance_prompt: true,
+    };
+    if (product_images?.length) genBody.image_url = product_images[0];
+    if (product_images?.length > 1) genBody.reference_image_urls = product_images.slice(0, 5);
+    
+    const genResult = await higgsFieldGenerate(genBody);
+    
+    res.json({
+      success: true,
+      template_id,
+      template_name: template.name,
+      template_category: template.category,
+      generation_id: extractRequestId(genResult),
+      status_url: `/api/video/status/${extractRequestId(genResult)}`,
+      model: selectedModel,
+      brand_dna_applied: !!brandDNA,
+      learning_applied: !!learningCtx,
+      motion_dna_applied: !!motionDNA,
+      edit_style: {
+        keyframes: template.keyframes || null,
+        structure: template.structure || null,
+        color_grading: template.grading || template.color_grading || null,
+        audio_sync: template.audio_sync || null,
+      },
+    });
+  } catch (e) {
+    log('EDIT_TEMPLATE', `Error: ${e.message}`);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/**
+ * GET /api/templates/trending — Get top trending video edit templates
+ */
+app.get('/api/templates/trending', (req, res) => {
+  const { limit: lim, category } = req.query;
+  let templates = Object.entries(VIDEO_EDIT_TEMPLATES)
+    .map(([id, data]) => ({ id, ...data }))
+    .sort((a, b) => (b.trending_score || 0) - (a.trending_score || 0));
+  
+  if (category) templates = templates.filter(t => t.category === category);
+  templates = templates.slice(0, parseInt(lim) || 10);
+  
+  res.json({
+    trending: templates,
+    total: templates.length,
+    updated_at: new Date().toISOString(),
+  });
+});
+
+/**
+ * POST /api/templates/community/share — Share a custom template to community
+ * (Phase 2: when community feature is live, stores in DB. Currently in-memory.)
+ */
+app.post('/api/templates/community/share', async (req, res) => {
+  try {
+    const { email, hash, name, description, category, keyframes, structure, tags } = req.body;
+    const client = await verifyClient(email, hash);
+    if (!client) return res.status(401).json({ error: 'Invalid credentials' });
+    
+    if (!name || !category) return res.status(400).json({ error: 'Name and category required' });
+    
+    const templateId = `community-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const template = {
+      name,
+      description: description || '',
+      category,
+      keyframes: keyframes || null,
+      structure: structure || null,
+      tags: tags || [],
+      shared_by: client.fields.brand_name || email,
+      shared_at: new Date().toISOString(),
+      uses: 0,
+      likes: 0,
+    };
+    
+    communityTemplates.set(templateId, template);
+    
+    res.json({
+      success: true,
+      template_id: templateId,
+      message: 'Template shared to community',
+      template,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/**
+ * GET /api/templates/community — Browse community-shared templates
+ */
+app.get('/api/templates/community', (req, res) => {
+  const { category, sort_by, limit: lim } = req.query;
+  let templates = Array.from(communityTemplates.entries()).map(([id, data]) => ({ id, ...data }));
+  
+  if (category) templates = templates.filter(t => t.category === category);
+  if (sort_by === 'popular') templates.sort((a, b) => b.uses - a.uses);
+  if (sort_by === 'recent') templates.sort((a, b) => new Date(b.shared_at) - new Date(a.shared_at));
+  if (sort_by === 'liked') templates.sort((a, b) => b.likes - a.likes);
+  
+  templates = templates.slice(0, parseInt(lim) || 20);
+  
+  res.json({ templates, total: templates.length });
+});
+
+/**
+ * POST /api/templates/community/:id/like — Like a community template
+ */
+app.post('/api/templates/community/:id/like', async (req, res) => {
+  const { email, hash } = req.body;
+  const client = await verifyClient(email, hash);
+  if (!client) return res.status(401).json({ error: 'Invalid credentials' });
+  
+  const template = communityTemplates.get(req.params.id);
+  if (!template) return res.status(404).json({ error: 'Template not found' });
+  
+  template.likes = (template.likes || 0) + 1;
+  res.json({ success: true, likes: template.likes });
+});
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 //  AD INTELLIGENCE STUDIO
@@ -6025,18 +7302,22 @@ app.post('/api/ad-intelligence', async (req, res) => {
     
     const brandContext = brandDNA ? `Brand DNA: ${JSON.stringify(brandDNA)}` : '';
     
+    // ━━ LEARNING CONTEXT ━━
+    const learningCtx = await buildLearningContext(clientName);
+    const enrichedBrandContext = brandContext + learningCtx;
+    
     const prompts = {
-      'copy-generator': `You are an elite advertising copywriter. Generate 5 ad copy variations for ${clientName}.\n${brandContext}\nProduct: ${product_name || 'brand product'}\nDescription: ${product_description || ''}\nTarget audience: ${target_audience || 'general'}\nPlatform: ${platform || 'Instagram/TikTok'}\n\nFor each variation provide:\n1. Headline (max 40 chars)\n2. Primary text (max 125 chars for feed, max 72 for stories)\n3. Call-to-action\n4. Hashtags (5 max)\n5. Hook (first 3 seconds for video)\n\nMake each variation distinctly different in approach: emotional, urgency, social proof, benefit-driven, curiosity.`,
+      'copy-generator': `You are an elite advertising copywriter. Generate 5 ad copy variations for ${clientName}.\n${enrichedBrandContext}\nProduct: ${product_name || 'brand product'}\nDescription: ${product_description || ''}\nTarget audience: ${target_audience || 'general'}\nPlatform: ${platform || 'Instagram/TikTok'}\n\nFor each variation provide:\n1. Headline (max 40 chars)\n2. Primary text (max 125 chars for feed, max 72 for stories)\n3. Call-to-action\n4. Hashtags (5 max)\n5. Hook (first 3 seconds for video)\n\nMake each variation distinctly different in approach: emotional, urgency, social proof, benefit-driven, curiosity.`,
       
-      'creative-brief': `You are a senior creative director. Create a comprehensive ad creative brief for ${clientName}.\n${brandContext}\nProduct: ${product_name || 'brand product'}\nTarget audience: ${target_audience || 'general'}\nPlatform: ${platform || 'Instagram/TikTok'}\nBudget: ${budget || 'not specified'}\nGoals: ${brand_goals || 'awareness and conversions'}\n\nProvide:\n1. Campaign concept and big idea\n2. Target audience persona (demographics, psychographics, pain points)\n3. Creative direction (visual style, mood, tone)\n4. Shot list / scene breakdown for video ads\n5. A/B test recommendations (what to test and why)\n6. Budget allocation across platforms\n7. KPIs and success metrics\n8. Timeline recommendations`,
+      'creative-brief': `You are a senior creative director. Create a comprehensive ad creative brief for ${clientName}.\n${enrichedBrandContext}\nProduct: ${product_name || 'brand product'}\nTarget audience: ${target_audience || 'general'}\nPlatform: ${platform || 'Instagram/TikTok'}\nBudget: ${budget || 'not specified'}\nGoals: ${brand_goals || 'awareness and conversions'}\n\nProvide:\n1. Campaign concept and big idea\n2. Target audience persona (demographics, psychographics, pain points)\n3. Creative direction (visual style, mood, tone)\n4. Shot list / scene breakdown for video ads\n5. A/B test recommendations (what to test and why)\n6. Budget allocation across platforms\n7. KPIs and success metrics\n8. Timeline recommendations`,
       
-      'competitor-analysis': `You are a competitive intelligence analyst. Research and analyze advertising strategies for competitors of ${clientName}.\n${brandContext}\nCompetitors to analyze: ${competitors?.join(', ') || 'top 5 competitors in this niche'}\n\nFor each competitor, provide:\n1. Current ad platforms they use\n2. Ad creative style and messaging themes\n3. Estimated monthly ad spend (use available data)\n4. Top performing ad formats\n5. Gaps and weaknesses in their ad strategy\n6. Opportunities for ${clientName} to differentiate\n\nUse real data from Facebook Ad Library and public sources.`,
+      'competitor-analysis': `You are a competitive intelligence analyst. Research and analyze advertising strategies for competitors of ${clientName}.\n${enrichedBrandContext}\nCompetitors to analyze: ${competitors?.join(', ') || 'top 5 competitors in this niche'}\n\nFor each competitor, provide:\n1. Current ad platforms they use\n2. Ad creative style and messaging themes\n3. Estimated monthly ad spend (use available data)\n4. Top performing ad formats\n5. Gaps and weaknesses in their ad strategy\n6. Opportunities for ${clientName} to differentiate\n\nUse real data from Facebook Ad Library and public sources.`,
       
-      'ad-ready-export': `You are a media buyer. Create a complete ad-ready content package for ${clientName}.\n${brandContext}\nProduct: ${product_name}\nPlatform: ${platform || 'all platforms'}\n\nProvide:\n1. Ad specifications per platform (dimensions, file types, max duration)\n2. Caption/copy per platform (optimized for each)\n3. Targeting recommendations (interests, demographics, lookalike audiences)\n4. Bid strategy recommendations\n5. Day-parting schedule (best times to run ads)\n6. Landing page recommendations\n7. Pixel/conversion setup checklist`,
+      'ad-ready-export': `You are a media buyer. Create a complete ad-ready content package for ${clientName}.\n${enrichedBrandContext}\nProduct: ${product_name}\nPlatform: ${platform || 'all platforms'}\n\nProvide:\n1. Ad specifications per platform (dimensions, file types, max duration)\n2. Caption/copy per platform (optimized for each)\n3. Targeting recommendations (interests, demographics, lookalike audiences)\n4. Bid strategy recommendations\n5. Day-parting schedule (best times to run ads)\n6. Landing page recommendations\n7. Pixel/conversion setup checklist`,
       
-      'performance-coaching': `You are an ad performance optimization expert. Provide coaching for ${clientName}'s advertising strategy.\n${brandContext}\nProduct: ${product_name || 'brand product'}\nTarget audience: ${target_audience || 'general'}\nBudget: ${budget || 'not specified'}\n\nProvide:\n1. Quick wins to improve ROAS immediately\n2. Creative fatigue indicators to watch for\n3. Scaling strategy (when and how to increase spend)\n4. Common mistakes to avoid for this niche\n5. Retargeting funnel recommendations\n6. UGC vs branded content performance insights\n7. Seasonal timing recommendations`,
+      'performance-coaching': `You are an ad performance optimization expert. Provide coaching for ${clientName}'s advertising strategy.\n${enrichedBrandContext}\nProduct: ${product_name || 'brand product'}\nTarget audience: ${target_audience || 'general'}\nBudget: ${budget || 'not specified'}\n\nProvide:\n1. Quick wins to improve ROAS immediately\n2. Creative fatigue indicators to watch for\n3. Scaling strategy (when and how to increase spend)\n4. Common mistakes to avoid for this niche\n5. Retargeting funnel recommendations\n6. UGC vs branded content performance insights\n7. Seasonal timing recommendations`,
       
-      'audience-targeting': `You are an audience research specialist. Build detailed audience targeting profiles for ${clientName}.\n${brandContext}\nProduct: ${product_name || 'brand product'}\nDescription: ${product_description || ''}\n\nProvide:\n1. Primary audience (demographics, interests, behaviors)\n2. Secondary audience (lookalike, expansion)\n3. Retargeting segments (website visitors, engagers, cart abandoners)\n4. Exclusion audiences (who NOT to target)\n5. Interest-based targeting keywords (for each platform)\n6. Custom audience recommendations\n7. Seasonal audience shifts`,
+      'audience-targeting': `You are an audience research specialist. Build detailed audience targeting profiles for ${clientName}.\n${enrichedBrandContext}\nProduct: ${product_name || 'brand product'}\nDescription: ${product_description || ''}\n\nProvide:\n1. Primary audience (demographics, interests, behaviors)\n2. Secondary audience (lookalike, expansion)\n3. Retargeting segments (website visitors, engagers, cart abandoners)\n4. Exclusion audiences (who NOT to target)\n5. Interest-based targeting keywords (for each platform)\n6. Custom audience recommendations\n7. Seasonal audience shifts`,
     };
     
     const completion = await openai.chat.completions.create({
@@ -6251,6 +7532,8 @@ const CREDIT_COSTS = {
   'voiceover': 5,
   'translate': 10,
   'ai-coach': 1,
+  'video-edit-template': 5,
+  'community-template-share': 0,
   'competitor-intel': 10,
   'ad-intelligence': 5,
   'influencer-discover': 5,
