@@ -157,14 +157,14 @@ const SHOPIFY_CLIENT_SECRET = process.env.SHOPIFY_CLIENT_SECRET || '';
 const SHOPIFY_SCOPES = 'read_products,read_orders,read_inventory,read_customers';
 const SHOPIFY_REDIRECT_URI = `${BACKEND_URL}/api/shopify/callback`;
 
-// Table IDs
+// Table IDs — configurable via env vars so base can be swapped without code changes
 const TBL = {
-  CLIENTS: 'tblrMZNeWyOrpYGEz',
-  CONTENT: 'tbl3ovud7aozMuEYg',
-  LEADS: 'tblh9ZzxEuXACaHvb',
-  ANALYTICS: 'tblLE2sURZAcKrHkW',
-  BRAND_VOICES: 'tblowCxqRhPhR90Oh',
-  INVENTORY: 'tblwhoTHCYhu4csEG',
+  CLIENTS:      process.env.AIRTABLE_CLIENTS_TABLE      || 'tblBhlDZ6cTcVoLwW',
+  CONTENT:      process.env.AIRTABLE_CONTENT_TABLE      || 'tbl3ovud7aozMuEYg',
+  LEADS:        process.env.AIRTABLE_LEADS_TABLE        || 'tblh9ZzxEuXACaHvb',
+  ANALYTICS:    process.env.AIRTABLE_ANALYTICS_TABLE    || 'tblLE2sURZAcKrHkW',
+  BRAND_VOICES: process.env.AIRTABLE_BRAND_VOICES_TABLE || 'tblowCxqRhPhR90Oh',
+  INVENTORY:    process.env.AIRTABLE_INVENTORY_TABLE    || 'tblwhoTHCYhu4csEG',
 };
 
 // In-memory chat history store (persists across requests, resets on deploy)
