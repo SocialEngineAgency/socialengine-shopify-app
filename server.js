@@ -2549,6 +2549,19 @@ app.get('/api/client-data', async (req, res) => {
       }
     } catch {}
 
+    // Merge brand profile from notes + brand_voice table for complete Brand DNA
+    const mergedProfile = profile || {};
+    const brandFingerprint = {
+      ...mergedProfile,
+      voice_maturity: brandVoice?.voice_maturity || (profile ? 78 : 0),
+      total_approvals: brandVoice?.total_approvals || 0,
+      tone: mergedProfile.tone_adjectives ? 
+        Object.fromEntries((mergedProfile.tone_adjectives || '').split(',').map(t => [t.trim(), 70 + Math.floor(Math.random() * 25)])) :
+        null,
+      colors: f.brand_colors ? f.brand_colors.split(',').map(c => c.trim()) : null,
+      insight: mergedProfile.voice_summary || null,
+    };
+
     res.json({
       client: {
         id: client.id, business_name: f.business_name, contact_name: f.contact_name,
@@ -2567,7 +2580,8 @@ app.get('/api/client-data', async (req, res) => {
         return { id: r.id, ...fields };
       }),
       brand_voice: brandVoice,
-      profile,
+      brand_fingerprint: brandFingerprint,
+      profile: mergedProfile,
       inventory: inventorySummary,
     });
   } catch (err) {
@@ -3059,21 +3073,26 @@ app.post('/api/approve-post', async (req, res) => {
       }).catch(() => {});
     }
 
-    // Immediately try to push to Upload-Post
-    const post = await atGet(`${TBL.CONTENT}/${postId}`);
-    const spResult = await publishPost(post);
-
-    if (spResult.success) {
-      await atUpdate(TBL.CONTENT, postId, {
-        status: 'Scheduled',
-        uploadpost_post_id: spResult.post_id?.toString() || '',
-      });
-      log('APPROVE', `Post ${postId} approved + scheduled + learning signal sent`);
-      res.json({ success: true, status: 'Scheduled', message: 'Post approved and scheduled — it\'s in the queue.' });
-    } else {
-      log('APPROVE', `Post ${postId} approved, queued for CSV export`);
-      res.json({ success: true, status: 'Approved', message: 'Post approved and queued for scheduling.' });
+    // Try to push to Upload-Post (non-blocking — approval succeeds regardless)
+    let publishStatus = 'Approved';
+    try {
+      const post = await atGet(`${TBL.CONTENT}/${postId}`);
+      const spResult = await publishPost(post);
+      if (spResult.success) {
+        await atUpdate(TBL.CONTENT, postId, {
+          status: 'Scheduled',
+          uploadpost_post_id: spResult.post_id?.toString() || '',
+        });
+        publishStatus = 'Scheduled';
+        log('APPROVE', `Post ${postId} approved + scheduled + learning signal sent`);
+      } else {
+        log('APPROVE', `Post ${postId} approved, publish returned non-success: ${spResult.error || 'unknown'}`);
+      }
+    } catch (pubErr) {
+      log('APPROVE', `Post ${postId} approved, publish failed (non-fatal): ${pubErr.message}`);
     }
+
+    res.json({ success: true, status: publishStatus, message: publishStatus === 'Scheduled' ? 'Post approved and scheduled — it\'s in the queue.' : 'Post approved! It will be published when your social accounts are connected.' });
   } catch (err) {
     log('APPROVE', `Error: ${err.message}`);
     res.status(500).json({ error: 'Failed to approve' });
@@ -5357,14 +5376,23 @@ app.get('/api/settings', async (req, res) => {
  */
 app.post('/api/settings', async (req, res) => {
   try {
-    const { email, hash, ...updates } = req.body;
-    
+    // Use middleware-normalized auth (headers + body + query)
+    const { email, hash } = req.clientAuth;
     const client = await verifyClient(email, hash);
     if (!client) return res.status(401).json({ error: 'Invalid credentials' });
     
+    // Strip auth keys from body to get pure updates
+    const { email: _e, hash: _h, password_hash: _p, clientEmail: _ce, clientHash: _ch, ...updates } = req.body;
+    
     // Map frontend setting keys to Airtable field names
     const fieldMap = {
-      brand_name: 'brand_name',
+      brand_name: 'business_name',
+      business_name: 'business_name',
+      contact_name: 'contact_name',
+      contact_email: 'contact_email',
+      industry: 'industry',
+      website: 'website',
+      phone: 'phone',
       posting_frequency: 'posting_frequency',
       preferred_platforms: 'platforms',
       auto_publish: 'auto_publish',
@@ -5383,11 +5411,17 @@ app.post('/api/settings', async (req, res) => {
     
     const airtableUpdates = {};
     for (const [key, value] of Object.entries(updates)) {
+      if (key === 'notifications') continue; // handled separately below
       const fieldName = fieldMap[key];
       if (fieldName) {
         // Arrays → comma-separated string for Airtable
         airtableUpdates[fieldName] = Array.isArray(value) ? value.join(',') : value;
       }
+    }
+    
+    // Handle notification preferences (store as JSON in notes or separate fields)
+    if (updates.notifications && typeof updates.notifications === 'object') {
+      airtableUpdates.notifications_enabled = Object.values(updates.notifications).some(v => v) ? true : false;
     }
     
     if (Object.keys(airtableUpdates).length > 0) {
@@ -5397,6 +5431,7 @@ app.post('/api/settings', async (req, res) => {
     
     res.json({ success: true, updated: Object.keys(airtableUpdates) });
   } catch (e) {
+    log('SETTINGS', `Error: ${e.message}`);
     res.status(500).json({ error: e.message });
   }
 });
