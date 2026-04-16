@@ -1629,11 +1629,20 @@ async function translateVideoScript(text, targetLanguage, options = {}) {
 async function loadBrandFingerprint(clientName) {
   try {
     const formula = encodeURIComponent(`{client_id}='${clientName}'`);
-    const data = await atGet(TBL.BRAND_VOICES, `filterByFormula=${formula}&maxRecords=1&sort%5B0%5D%5Bfield%5D=version&sort%5B0%5D%5Bdirection%5D=desc`);
+    const data = await atGet(TBL.BRAND_VOICES, `filterByFormula=${formula}&maxRecords=1`);
     if (!data.records?.[0]) return null;
     const f = data.records[0].fields;
-    // If visual_seed is stored as JSON parse it, otherwise return raw
-    try { return JSON.parse(f.visual_seed || '{}'); } catch { return { visual_seed: f.visual_seed }; }
+    // Return rich brand DNA object from actual BRAND_VOICES schema
+    return {
+      brand_name: f.brand_name || clientName,
+      tone: f.tone || '',
+      voice_profile: f.voice_profile || '',
+      brand_dna: f.brand_dna || '',
+      competitor_brands: f.competitor_brands || '',
+      target_audience: f.target_audience || '',
+      // Learning signals stored as JSON in brand_dna extended field
+      _record_id: data.records[0].id,
+    };
   } catch {
     return null;
   }
@@ -4628,6 +4637,93 @@ app.get('/api/client-analytics', async (req, res) => {
 // Upload-Post handles all OAuth — we redirect to their white-label connect flow
 // REMOVED: Old connect-social — replaced by /api/social/connect (Upload-Post white-label)
 
+// ── GET /api/learning-progress ──
+// Returns the AI learning state for the logged-in client: accuracy score, interaction counts,
+// brand DNA status, and the correct messaging about pre-training vs. ongoing learning.
+app.get('/api/learning-progress', async (req, res) => {
+  const { email, hash } = req.clientAuth;
+  const client = await verifyClient(email, hash);
+  if (!client) return res.status(401).json({ error: 'Unauthorized' });
+
+  try {
+    const f = client.fields;
+    const clientName = f.business_name || f.brand_name || email;
+
+    // Load BRAND_VOICES record for this client
+    const bvFormula = encodeURIComponent(`{client_id}='${clientName}'`);
+    const bvData = await atGet(TBL.BRAND_VOICES, `filterByFormula=${bvFormula}&maxRecords=1`);
+    const bv = bvData.records?.[0]?.fields || null;
+    const brandDNABuilt = !!bv;
+
+    // Parse learning history from CLIENTS notes field (stored as JSON)
+    let learningHistory = {};
+    try { learningHistory = JSON.parse(f.notes || '{}'); } catch {}
+    const lh = learningHistory.learning_history || learningHistory;
+
+    const totalInteractions = lh.total_interactions || 0;
+    const approvedCount = lh.approved_count || 0;
+    const rejectedCount = lh.rejected_count || 0;
+    const regeneratedCount = lh.regenerated_count || 0;
+    const approvalRate = approvedCount + rejectedCount > 0
+      ? Math.round((approvedCount / (approvedCount + rejectedCount)) * 100)
+      : 100;
+
+    // Accuracy formula: starts at 60% from day 1 (pre-trained on brand DNA)
+    // Climbs with every approve/reject/regenerate signal
+    const accuracyScore = brandDNABuilt
+      ? Math.min(98, 60 + Math.round(Math.log(totalInteractions + 1) * 8 * (approvalRate / 100)))
+      : 40;
+
+    // Determine learning stage and messaging
+    let stage, stageMessage;
+    if (!brandDNABuilt) {
+      stage = 'initializing';
+      stageMessage = 'Complete onboarding to activate your AI brand profile.';
+    } else if (totalInteractions === 0) {
+      stage = 'pre_trained';
+      stageMessage = 'Pre-trained on your brand before you logged in. Every approval sharpens it further.';
+    } else if (totalInteractions < 5) {
+      stage = 'learning';
+      stageMessage = `${totalInteractions} signal${totalInteractions === 1 ? '' : 's'} received. AI is calibrating to your exact preferences.`;
+    } else if (totalInteractions < 20) {
+      stage = 'calibrating';
+      stageMessage = `Getting sharper. AI has learned from ${totalInteractions} of your decisions.`;
+    } else if (totalInteractions < 50) {
+      stage = 'personalized';
+      stageMessage = `Genuinely personalized. AI knows your brand voice across ${totalInteractions} decisions.`;
+    } else {
+      stage = 'mastered';
+      stageMessage = `Deeply trained. Writing reliably in your brand voice after ${totalInteractions} interactions.`;
+    }
+
+    res.json({
+      success: true,
+      client_name: clientName,
+      brand_dna_built: brandDNABuilt,
+      brand_dna_strands: bv ? {
+        tone: !!bv.tone,
+        voice_profile: !!bv.voice_profile,
+        brand_dna: !!bv.brand_dna,
+        target_audience: !!bv.target_audience,
+        competitor_brands: !!bv.competitor_brands,
+      } : null,
+      accuracy_score: accuracyScore,
+      total_interactions: totalInteractions,
+      approved_count: approvedCount,
+      rejected_count: rejectedCount,
+      regenerated_count: regeneratedCount,
+      approval_rate: approvalRate,
+      stage,
+      stage_message: stageMessage,
+      pre_trained: brandDNABuilt,
+      pre_training_message: 'Pre-trained on your brand before you log in. Gets sharper with every decision.',
+    });
+  } catch (e) {
+    log('LEARNING', `Error: ${e.message}`);
+    res.status(500).json({ error: 'Failed to load learning progress' });
+  }
+});
+
 
 
 
@@ -6005,8 +6101,16 @@ async function loadBrandFingerprint(clientName) {
 
 function buildBrandPromptPrefix(brandDNA, clientName) {
   if (!brandDNA) return '';
-  const dnaStr = typeof brandDNA === 'string' ? brandDNA : JSON.stringify(brandDNA);
-  return `[BRAND DNA FOR ${clientName}]: ${dnaStr}\n\nYou MUST follow this brand's visual style, tone, color palette, and identity. THE PRODUCT MUST REMAIN COMPLETELY UNCHANGED IN EVERY SINGLE FRAME — identical fabric pattern, identical text, identical colors, identical cut and silhouette — no alterations, no simplifications, no color drift.\n\n`;
+  // Build a rich, structured prompt prefix from the actual BRAND_VOICES fields
+  const name = brandDNA.brand_name || clientName;
+  let prefix = `[BRAND DNA — ${name}]\n`;
+  if (brandDNA.tone) prefix += `TONE: ${brandDNA.tone}\n`;
+  if (brandDNA.voice_profile) prefix += `VOICE PROFILE:\n${brandDNA.voice_profile}\n`;
+  if (brandDNA.brand_dna) prefix += `BRAND DNA:\n${brandDNA.brand_dna}\n`;
+  if (brandDNA.target_audience) prefix += `TARGET AUDIENCE: ${brandDNA.target_audience}\n`;
+  if (brandDNA.competitor_brands) prefix += `COMPETITORS TO DIFFERENTIATE FROM: ${brandDNA.competitor_brands}\n`;
+  prefix += `\nYOU MUST embody this brand's voice, aesthetics, and identity in every word and visual direction. ${PRODUCT_PRESERVATION_PROMPT}\n\n`;
+  return prefix;
 }
 
 const PRODUCT_PRESERVATION_PROMPT = 'THE PRODUCT MUST REMAIN COMPLETELY UNCHANGED IN EVERY SINGLE FRAME — identical fabric pattern, identical text on fabric, identical strap placement, identical hardware positions, identical colors, identical cut and silhouette — no alterations, no simplifications, no color drift, no missing anything. No people walking through anything solid, laws of newtonian physics and the material 3D world ALWAYS apply. All frames, people, structures, objects, everything is to look like real life.';
@@ -7878,10 +7982,27 @@ app.post('/api/studio/generate-video', async (req, res) => {
       });
     }
 
+    // Load brand DNA and inject into video prompt
+    const clientName = client.fields.brand_name || client.fields.business_name;
+    const brandDNA = await loadBrandFingerprint(clientName);
+    const brandVoiceRec = await (async () => {
+      try {
+        const formula = encodeURIComponent(`{voice_label}='${clientName}'`);
+        const bvData = await atGet(TBL.BRAND_VOICES, `filterByFormula=${formula}&maxRecords=1`);
+        return bvData.records?.[0]?.fields || null;
+      } catch { return null; }
+    })();
+    const brandStyleStr = brandVoiceRec
+      ? `Brand: ${clientName}. Archetype: ${brandVoiceRec.archetype || ''}. Visual direction: ${brandVoiceRec.visual_direction || ''}. Tone: ${brandVoiceRec.tone_adjectives || ''}. ${PRODUCT_PRESERVATION_PROMPT}`
+      : `${PRODUCT_PRESERVATION_PROMPT}`;
+    const learningCtx = await buildLearningContext(clientName);
+    const basePrompt = prompt || `${productTitle ? productTitle + ' — ' : ''}Cinematic product showcase, ${aspectRatio} format`;
+    const enrichedPrompt = `${basePrompt} | ${brandStyleStr}${learningCtx ? ' | ' + learningCtx.substring(0, 300) : ''}`;
+
     // Build the Higgsfield request
     const modelId = use_flf ? 'kling-v2-1-flf' : model.replace('.', '-').replace('kling-', 'kling-v');
     const requestBody = {
-      prompt: prompt || `${productTitle ? productTitle + ' — ' : ''}Cinematic product showcase, ${aspectRatio} format`,
+      prompt: enrichedPrompt,
       aspect_ratio: aspectRatio,
       duration: parseInt(duration),
       ...(imageUrl ? { image_url: imageUrl } : {}),
@@ -8066,8 +8187,11 @@ app.get('/api/studio/products', async (req, res) => {
 
     if (f.website || f.shopify_domain) {
       const shopifyDomain = f.shopify_domain || (f.website || '').replace(/https?:\/\//, '');
+      const shopifyToken = f.shopify_access_token || null;
       try {
-        const allProducts = await fetchAllShopifyProducts(`https://${shopifyDomain}`);
+        // 8-second timeout to prevent Railway 502 on password-protected stores
+        const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('Shopify timeout')), 8000));
+        const allProducts = await Promise.race([fetchAllShopifyProducts(`https://${shopifyDomain}`, shopifyToken), timeout]);
         products = allProducts.slice(0, limit).map(p => ({
           id: p.id,
           title: p.title,
