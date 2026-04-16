@@ -2495,6 +2495,49 @@ Return JSON only:
       log('AUDIT', `Portal auto-create failed: ${e.message}`);
     }
 
+    // ── Auto-build BRAND_VOICES from audit data (non-blocking Perplexity deep-dive)
+    //    This means by the time a new client logs in, their AI is already trained
+    if (portalCreated && products.length > 0) {
+      (async () => {
+        try {
+          const cleanDomain = website.replace(/^https?:\/\//, '').replace(/\/$/, '');
+          const clientName = name || cleanDomain;
+          const descriptions = products.slice(0, 20).map(p =>
+            `"${p.title}": ${(p.body_html || '').replace(/<[^>]*>/g, '').substring(0, 200)}`
+          ).join('\n');
+          const auditBrandPrompt = `You are a world-class brand strategist. Analyze this Shopify store from the audit data and build a comprehensive brand intelligence profile.\n\nBusiness: ${clientName}\nWebsite: ${website}\nAudit Score: ${audit.overall_score}/100\nStrengths: ${(audit.strengths || []).join(', ')}\nContent Themes Identified: ${audit.content_themes?.join(', ') || 'not specified'}\n\nPRODUCT CATALOG:\n${descriptions}\n\nReturn JSON only:\n{\n  "tone": "4-5 tone words that define this brand",\n  "voice_profile": "2-3 sentence brand voice description for AI content engine",\n  "brand_dna": "Comprehensive: archetype (use one of: Outlaw/Hero/Caregiver/Creator/Sage/Innocent/Explorer/Ruler/Magician/Jester/Lover/Everyman), personality, visual style, hook style, CTA style, content themes, do-words, dont-words, anti-brand",\n  "competitor_brands": "Comma-separated likely competitors",\n  "target_audience": "Ideal customer: age range, interests, lifestyle, purchase motivation"\n}`;
+          const brandCompletion = await openai.chat.completions.create({
+            model: 'sonar-pro',
+            messages: [{ role: 'user', content: auditBrandPrompt }],
+            temperature: 0.5,
+          });
+          let brandProfile;
+          try { brandProfile = JSON.parse(brandCompletion.choices[0].message.content); } catch { return; }
+          // Check if record already exists
+          const bvCheck = await atGet(TBL.BRAND_VOICES, `filterByFormula=${encodeURIComponent(`{client_email}='${email}'`)}&maxRecords=1`);
+          const bvAuditFields = {
+            client_id: clientName,
+            client_email: email,
+            brand_name: clientName,
+            tone: brandProfile.tone || '',
+            voice_profile: brandProfile.voice_profile || '',
+            brand_dna: brandProfile.brand_dna || '',
+            competitor_brands: brandProfile.competitor_brands || '',
+            target_audience: brandProfile.target_audience || '',
+            updated_at: new Date().toISOString(),
+          };
+          if (bvCheck.records?.[0]) {
+            await atUpdate(TBL.BRAND_VOICES, bvCheck.records[0].id, bvAuditFields);
+          } else {
+            await atCreate(TBL.BRAND_VOICES, bvAuditFields);
+          }
+          log('AUDIT', `Pre-trained brand profile built for ${clientName} via Perplexity — AI ready before first login`);
+        } catch (e) {
+          log('AUDIT', `Brand pre-training failed: ${e.message}`);
+        }
+      })();
+    }
+
     // Send email with portal access (non-blocking)
     if (resend) resend.emails.send({
       to: email,
@@ -2534,11 +2577,49 @@ app.get('/api/client-data', async (req, res) => {
     );
 
     let brandVoice = null;
+    let brandVoiceRecordId = null;
     try {
-      const bvFormula = encodeURIComponent(`{voice_label}='${f.business_name}'`);
+      const bvFormula = encodeURIComponent(`OR({client_id}='${f.business_name}',{client_email}='${f.contact_email}')`);
       const bvData = await atGet(TBL.BRAND_VOICES, `filterByFormula=${bvFormula}&maxRecords=1`);
       brandVoice = bvData.records?.[0]?.fields || null;
+      brandVoiceRecordId = bvData.records?.[0]?.id || null;
     } catch {}
+
+    // ── Brand fingerprint auto-fire: if no BRAND_VOICES record AND client has a Shopify store,
+    //    kick off background Perplexity brand analysis so AI is personalized from day one
+    if (!brandVoice && f.website) {
+      log('BRAND', `No brand voice found for ${f.business_name} — auto-running Perplexity brand analysis`);
+      (async () => {
+        try {
+          const products = await fetchAllShopifyProducts(f.website).catch(() => []);
+          const descriptions = products.slice(0, 20).map(p =>
+            `"${p.title}": ${(p.body_html || '').replace(/<[^>]*>/g, '').substring(0, 200)}`
+          ).join('\n');
+          const autoPrompt = `Analyze this Shopify store and build a brand intelligence profile.\n\nStore: ${f.website}\nBusiness: ${f.business_name}\nIndustry: ${f.industry || 'E-commerce'}\n\nPRODUCT CATALOG (real data):\n${descriptions || 'No product data — infer from store name and industry'}\n\nReturn JSON only:\n{\n  "tone": "3-4 tone words e.g. bold, playful, unapologetic",\n  "voice_profile": "2-3 sentence voice description for AI content engine",\n  "brand_dna": "Detailed brand DNA: archetype, personality, visual style, hook style, CTA style, content themes, do-words, dont-words",\n  "competitor_brands": "Comma-separated likely competitors based on products and positioning",\n  "target_audience": "One paragraph ideal customer: age, interests, lifestyle, shopping behavior"\n}`;
+          const autoCompletion = await openai.chat.completions.create({
+            model: 'sonar-pro',
+            messages: [{ role: 'user', content: autoPrompt }],
+            temperature: 0.5,
+          });
+          let autoBrandProfile;
+          try { autoBrandProfile = JSON.parse(autoCompletion.choices[0].message.content); } catch { return; }
+          await atCreate(TBL.BRAND_VOICES, {
+            client_id: f.business_name,
+            client_email: f.contact_email || '',
+            brand_name: f.business_name,
+            tone: autoBrandProfile.tone || '',
+            voice_profile: autoBrandProfile.voice_profile || '',
+            brand_dna: autoBrandProfile.brand_dna || '',
+            competitor_brands: autoBrandProfile.competitor_brands || '',
+            target_audience: autoBrandProfile.target_audience || '',
+            updated_at: new Date().toISOString(),
+          });
+          log('BRAND', `Auto-built brand profile for ${f.business_name} via Perplexity`);
+        } catch (e) {
+          log('BRAND', `Auto brand analysis failed for ${f.business_name}: ${e.message}`);
+        }
+      })();
+    }
 
     let profile = null;
     try { if (f.notes) profile = JSON.parse(f.notes); } catch {}
@@ -3235,6 +3316,105 @@ app.post('/api/regenerate-post', async (req, res) => {
   }
 });
 
+// ── POST /api/brand-intelligence ──
+// Perplexity-powered deep brand research: web mentions + competitor analysis + trend injection
+// Call this to pre-build or refresh a client's brand profile without waiting for onboarding
+app.post('/api/brand-intelligence', async (req, res) => {
+  const { email, hash } = req.clientAuth;
+  const client = await verifyClient(email, hash);
+  if (!client) return res.status(401).json({ error: 'Unauthorized' });
+
+  try {
+    const f = client.fields;
+    const clientName = f.business_name;
+    const website = f.website || '';
+    const shopifyDomain = f.shopify_domain || '';
+    log('BRAND_INTEL', `Running Perplexity brand intelligence for ${clientName}`);
+
+    // Phase 1: Real-time web intelligence (Perplexity Sonar with web access)
+    const [webIntelCompletion, competitorCompletion, trendCompletion] = await Promise.all([
+      // What is being said about this brand online?
+      openai.chat.completions.create({
+        model: 'sonar-pro',
+        messages: [{ role: 'user', content: `Search the web and analyze the brand "${clientName}" (website: ${website || shopifyDomain}). Find:\n1. How customers describe them in reviews\n2. Their social media tone and content style\n3. What makes them different from competitors\n4. Any negative sentiment to avoid\n5. Trending content formats in their niche right now\n\nReturn JSON only:\n{\n  "brand_perception": "How customers actually describe this brand online",\n  "content_style_observed": "What their actual social content looks like",\n  "differentiation": "What genuinely makes them unique",\n  "sentiment_risks": "Any negative patterns to avoid",\n  "trending_formats": "Top 3 trending content formats in their niche right now with citations"\n}` }],
+        temperature: 0.3,
+      }).catch(() => null),
+      // Who are the real competitors and what are their gaps?
+      openai.chat.completions.create({
+        model: 'sonar-pro',
+        messages: [{ role: 'user', content: `Search the web for the top competitors of "${clientName}" in the ${f.industry || 'e-commerce'} space.\n\nReturn JSON only:\n{\n  "competitors": [\n    { "name": "brand name", "strength": "what they do well", "gap": "where they fall short that ${clientName} could own" }\n  ],\n  "market_gap": "The single biggest content/positioning gap ${clientName} could own right now",\n  "content_angles": "3 content angles competitors are NOT doing that would work for ${clientName}"\n}` }],
+        temperature: 0.3,
+      }).catch(() => null),
+      // What's trending in their space today?
+      openai.chat.completions.create({
+        model: 'sonar',
+        messages: [{ role: 'user', content: `What are the top trending topics, hashtags, and content formats for ${f.industry || 'e-commerce fashion'} brands on Instagram and TikTok RIGHT NOW in ${new Date().toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}?\n\nReturn JSON only:\n{\n  "trending_hashtags": ["hashtag1", "hashtag2", "hashtag3", "hashtag4", "hashtag5"],\n  "trending_formats": ["format1", "format2", "format3"],\n  "trending_audio": "Current viral audio trend to consider",\n  "seasonal_opportunity": "Any seasonal event or moment to capitalize on this month"\n}` }],
+        temperature: 0.3,
+      }).catch(() => null),
+    ]);
+
+    // Phase 2: Parse results
+    let webIntel = {}, competitorIntel = {}, trendIntel = {};
+    try { webIntel = JSON.parse(webIntelCompletion?.choices?.[0]?.message?.content || '{}'); } catch {}
+    try { competitorIntel = JSON.parse(competitorCompletion?.choices?.[0]?.message?.content || '{}'); } catch {}
+    try { trendIntel = JSON.parse(trendCompletion?.choices?.[0]?.message?.content || '{}'); } catch {}
+
+    // Phase 3: Fetch existing brand voice and enrich it
+    const bvFormula = encodeURIComponent(`OR({client_id}='${clientName}',{client_email}='${f.contact_email}')`);
+    const existing = await atGet(TBL.BRAND_VOICES, `filterByFormula=${bvFormula}&maxRecords=1`);
+    const existingDNA = existing.records?.[0]?.fields || {};
+
+    // Merge new intelligence into brand DNA
+    let brandDnaObj = {};
+    try { brandDnaObj = JSON.parse(existingDNA.brand_dna || '{}'); } catch {}
+    brandDnaObj.competitor_gap = competitorIntel.market_gap || '';
+    brandDnaObj.content_angles_competitors_miss = competitorIntel.content_angles || '';
+    brandDnaObj.trending_formats = trendIntel.trending_formats || [];
+    brandDnaObj.trending_hashtags = trendIntel.trending_hashtags || [];
+    brandDnaObj.seasonal_opportunity = trendIntel.seasonal_opportunity || '';
+    brandDnaObj.brand_perception_online = webIntel.brand_perception || '';
+    brandDnaObj.content_style_observed = webIntel.content_style_observed || '';
+    brandDnaObj.sentiment_risks = webIntel.sentiment_risks || '';
+    brandDnaObj.last_intelligence_refresh = new Date().toISOString();
+
+    const enrichedFields = {
+      client_id: clientName,
+      client_email: f.contact_email || '',
+      brand_name: clientName,
+      competitor_brands: (competitorIntel.competitors || []).map(c => c.name).join(', ') || existingDNA.competitor_brands || '',
+      brand_dna: JSON.stringify(brandDnaObj),
+      updated_at: new Date().toISOString(),
+    };
+    // Preserve existing tone/voice if already set
+    if (!existingDNA.tone || existingDNA.tone.length < 5) enrichedFields.tone = webIntel.content_style_observed || existingDNA.tone || '';
+    if (!existingDNA.voice_profile) enrichedFields.voice_profile = webIntel.brand_perception || '';
+    if (!existingDNA.target_audience) enrichedFields.target_audience = existingDNA.target_audience || '';
+
+    if (existing.records?.[0]) {
+      await atUpdate(TBL.BRAND_VOICES, existing.records[0].id, enrichedFields);
+      log('BRAND_INTEL', `Updated brand intelligence for ${clientName}`);
+    } else {
+      await atCreate(TBL.BRAND_VOICES, enrichedFields);
+      log('BRAND_INTEL', `Created brand intelligence for ${clientName}`);
+    }
+
+    res.json({
+      success: true,
+      intelligence: {
+        web_intel: webIntel,
+        competitors: competitorIntel.competitors || [],
+        market_gap: competitorIntel.market_gap || '',
+        content_angles: competitorIntel.content_angles || '',
+        trending: trendIntel,
+      },
+      message: `Brand intelligence refreshed for ${clientName}. AI content engine updated with real-time market data.`,
+    });
+  } catch (e) {
+    log('BRAND_INTEL', `Error: ${e.message}`);
+    res.status(500).json({ error: 'Brand intelligence failed' });
+  }
+});
+
 // ── POST /api/brand-fingerprint ──
 // Upload brand photo URLs → Vision API extracts visual DNA → stores in Brand Voices
 app.post('/api/brand-fingerprint', async (req, res) => {
@@ -3390,18 +3570,42 @@ Return JSON:
     try { profile = JSON.parse(completion.choices[0].message.content); }
     catch { return res.status(500).json({ error: 'Failed to generate profile' }); }
 
-    await atCreate(TBL.BRAND_VOICES, {
-      voice_label: f.business_name,
-      client_id: f.business_name,
-      version: 1,
-      tone_adjectives: profile.tone_adjectives || '',
+    // Check if BRAND_VOICES record already exists for this client
+    const existBvFormula = encodeURIComponent(`OR({client_id}='${f.business_name}',{client_email}='${f.contact_email}')`);
+    const existBv = await atGet(TBL.BRAND_VOICES, `filterByFormula=${existBvFormula}&maxRecords=1`);
+    // Build full brand DNA as structured JSON string
+    const brandDnaObj = {
       archetype: profile.archetype || '',
+      archetype_secondary: profile.archetype_secondary || '',
+      archetype_rationale: profile.archetype_rationale || '',
+      tone_adjectives: profile.tone_adjectives || '',
       voice_summary: profile.voice_summary || '',
       do_words: profile.do_words || '',
       dont_words: profile.dont_words || '',
       content_themes: profile.content_themes || '',
       visual_direction: profile.visual_direction || '',
-    });
+      hook_style: profile.hook_style || '',
+      cta_style: profile.cta_style || '',
+      customer_avatar: profile.customer_avatar || '',
+    };
+    const bvOnboardFields = {
+      client_id: f.business_name,
+      client_email: f.contact_email || '',
+      brand_name: f.business_name,
+      tone: profile.tone_adjectives || '',
+      voice_profile: profile.voice_summary || '',
+      brand_dna: JSON.stringify(brandDnaObj),
+      competitor_brands: answers.q4 || '',
+      target_audience: profile.customer_avatar || '',
+      updated_at: new Date().toISOString(),
+    };
+    if (existBv.records?.[0]) {
+      await atUpdate(TBL.BRAND_VOICES, existBv.records[0].id, bvOnboardFields);
+      log('ONBOARDING', `Updated existing BRAND_VOICES for ${f.business_name}`);
+    } else {
+      await atCreate(TBL.BRAND_VOICES, bvOnboardFields);
+      log('ONBOARDING', `Created BRAND_VOICES for ${f.business_name}`);
+    }
 
     await atUpdate(TBL.CLIENTS, client.id, {
       onboarding_date: new Date().toISOString().split('T')[0],
@@ -3716,7 +3920,7 @@ app.post('/api/chat', async (req, res) => {
     // Load brand voice
     let brandVoice = null;
     try {
-      const bvFormula = encodeURIComponent(`{voice_label}='${f.business_name}'`);
+      const bvFormula = encodeURIComponent(`OR({client_id}='${f.business_name}',{client_email}='${f.contact_email}')`);
       const bvData = await atGet(TBL.BRAND_VOICES, `filterByFormula=${bvFormula}&maxRecords=1`);
       brandVoice = bvData.records?.[0]?.fields || null;
     } catch {}
@@ -7862,7 +8066,7 @@ app.post('/api/chat/v2', async (req, res) => {
     // Load brand voice
     let brandVoice = null;
     try {
-      const bvF = encodeURIComponent(`{voice_label}='${clientName}'`);
+      const bvF = encodeURIComponent(`OR({client_id}='${clientName}',{client_email}='${clientEmail || clientName}')`);
       const bvD = await atGet(TBL.BRAND_VOICES, `filterByFormula=${bvF}&maxRecords=1`);
       brandVoice = bvD.records?.[0]?.fields || null;
     } catch {}
@@ -7987,7 +8191,7 @@ app.post('/api/studio/generate-video', async (req, res) => {
     const brandDNA = await loadBrandFingerprint(clientName);
     const brandVoiceRec = await (async () => {
       try {
-        const formula = encodeURIComponent(`{voice_label}='${clientName}'`);
+        const formula = encodeURIComponent(`OR({client_id}='${clientName}',{client_email}='${clientEmail || clientName}')`);
         const bvData = await atGet(TBL.BRAND_VOICES, `filterByFormula=${formula}&maxRecords=1`);
         return bvData.records?.[0]?.fields || null;
       } catch { return null; }
@@ -8329,7 +8533,7 @@ app.post('/api/ai/generate-ad-copy', async (req, res) => {
 
     let brandVoice = null;
     try {
-      const bvF = encodeURIComponent(`{voice_label}='${clientName}'`);
+      const bvF = encodeURIComponent(`OR({client_id}='${clientName}',{client_email}='${clientEmail || clientName}')`);
       const bvD = await atGet(TBL.BRAND_VOICES, `filterByFormula=${bvF}&maxRecords=1`);
       brandVoice = bvD.records?.[0]?.fields || null;
     } catch {}
@@ -8416,7 +8620,7 @@ app.post('/api/inbox/generate-reply', async (req, res) => {
 
     let brandVoice = null;
     try {
-      const bvF = encodeURIComponent(`{voice_label}='${clientName}'`);
+      const bvF = encodeURIComponent(`OR({client_id}='${clientName}',{client_email}='${clientEmail || clientName}')`);
       const bvD = await atGet(TBL.BRAND_VOICES, `filterByFormula=${bvF}&maxRecords=1`);
       brandVoice = bvD.records?.[0]?.fields || null;
     } catch {}
