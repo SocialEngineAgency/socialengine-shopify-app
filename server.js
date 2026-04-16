@@ -2746,10 +2746,8 @@ Return JSON:
       image_url: newImageUrl,
       image_prompt: newImagePrompt,
       video_url: newVideoUrl,
-      client_feedback: direction || '',
-      regen_count: regenCount + 1,
       status: 'Ready for Review', // Back in queue for client to review
-      post_label: `${clientName} · ${platform} · ${newPost.content_type || oldContentType} [regen ${regenCount + 1}]`,
+      post_label: `${clientName} · ${platform} · ${newPost.content_type || oldContentType} [regen]`,
     });
 
     // Persist regenerated image to Airtable attachment for permanent URL
@@ -3047,7 +3045,7 @@ app.post('/api/approve-post', async (req, res) => {
     const originalCaption = postRecord?.fields?.caption || '';
     
     // If client edited the caption before approving, save it first
-    const updateFields = { status: 'Approved', client_action: 'approved' };
+    const updateFields = { status: 'Approved' };
     if (editedCaption && editedCaption.trim()) {
       updateFields.full_post_text = editedCaption.trim();
       updateFields.caption = editedCaption.trim();
@@ -3133,12 +3131,9 @@ app.post('/api/reject-post', async (req, res) => {
     const postFields = postRecord.fields || {};
     const regenCount = parseInt(postFields.regen_count || 0);
 
-    // Store the rejection + feedback
+    // Store the rejection
     await atUpdate(TBL.CONTENT, postId, {
       status: 'Rejected',
-      client_feedback: reason || '',
-      client_action: 'rejected',
-      regen_count: regenCount,
     });
 
     // ━━ LEARNING SIGNAL: Rejection ━━
@@ -3202,7 +3197,7 @@ app.post('/api/regenerate-post', async (req, res) => {
     }
 
     // Mark as Regenerating so client sees progress in portal
-    await atUpdate(TBL.CONTENT, postId, { status: 'Regenerating', client_feedback: direction || '', client_action: 'regenerated' });
+    await atUpdate(TBL.CONTENT, postId, { status: 'Regenerating' });
     
     // ━━ LEARNING SIGNAL: Regeneration ━━
     const clientName = client.fields.brand_name || client.fields.business_name || req.body.email;
