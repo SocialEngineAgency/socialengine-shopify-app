@@ -3808,7 +3808,10 @@ app.get('/api/admin/stats', async (req, res) => {
     const leads = await atGetAll(TBL.LEADS);
     const content = await atGetAll(TBL.CONTENT);
 
-    const activeClients = clients.filter(c => c.fields.status === 'Active').length;
+    const activeClients = clients.filter(c => {
+      const s = (c.fields.Status || c.fields.status || '').toLowerCase();
+      return s === 'active';
+    }).length;
     const totalLeads = leads.length;
     const newLeads = leads.filter(l => l.fields.Status === 'New').length;
     const totalPosts = content.length;
