@@ -4731,18 +4731,29 @@ app.get('/api/settings', async (req, res) => {
     
     const f = client.fields;
     
+    // Helper: safely convert Airtable field to string array (handles both arrays and comma-separated strings)
+    const toArr = (val, fallback = []) => {
+      if (Array.isArray(val)) return val.map(v => String(v).trim()).filter(Boolean);
+      if (typeof val === 'string' && val.length > 0) return val.split(',').map(p => p.trim()).filter(Boolean);
+      return fallback;
+    };
+    
     res.json({
       account: {
         name: f.contact_name || '',
         email: f.contact_email || email,
-        brand_name: f.brand_name || '',
+        brand_name: f.brand_name || f.business_name || '',
+        business_name: f.business_name || f.brand_name || '',
         website: f.website || '',
         plan: f.plan || 'free',
+        tier: f.tier || 'Growth',
         joined: f.created_at || '',
+        industry: f.industry || '',
+        phone: f.phone || '',
       },
       preferences: {
         posting_frequency: f.posting_frequency || 'daily',
-        preferred_platforms: (f.platforms || 'Instagram,TikTok').split(',').map(p => p.trim()),
+        preferred_platforms: toArr(f.platforms, ['Instagram', 'TikTok']),
         auto_publish: f.auto_publish === true || f.auto_publish === 'true',
         approval_required: f.approval_required !== false && f.approval_required !== 'false',
         notification_email: f.notification_email !== false,
@@ -4752,8 +4763,8 @@ app.get('/api/settings', async (req, res) => {
       integrations: {
         shopify_connected: !!f.shopify_domain,
         shopify_domain: f.shopify_domain || null,
-        social_accounts_connected: (f.connected_platforms || '').split(',').filter(Boolean).length,
-        connected_platforms: (f.connected_platforms || '').split(',').filter(Boolean),
+        social_accounts_connected: toArr(f.connected_platforms).length,
+        connected_platforms: toArr(f.connected_platforms),
         upload_post_connected: !!UPLOADPOST_API_KEY,
       },
       video_settings: {
@@ -4769,7 +4780,7 @@ app.get('/api/settings', async (req, res) => {
       },
       inbox: {
         auto_reply_enabled: f.auto_reply === true || f.auto_reply === 'true',
-        monitored_platforms: (f.inbox_platforms || 'instagram,tiktok').split(',').filter(Boolean),
+        monitored_platforms: toArr(f.inbox_platforms, ['instagram', 'tiktok']),
       },
     });
   } catch (e) {
