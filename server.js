@@ -7141,17 +7141,28 @@ app.post('/api/templates/video-edits/apply', async (req, res) => {
     if (custom_prompt) editPrompt += `\n\nAdditional direction: ${custom_prompt}`;
     
     // Select best model for the edit type
-    const modelForCategory = {
+    // Model selection: image-to-video if product images provided, text-to-video otherwise
+    const hasImages = product_images?.length > 0;
+    const modelForCategoryI2V = {
       'velocity': 'seedance-pro',
       'transition': 'seedance-pro',
       'beat-sync': 'seedance-pro',
       'text-overlay': 'dop-standard',
-      'montage': 'kling-3.0-t2v',
+      'montage': 'kling-3.0-i2v',
       'color-grade': 'dop-standard',
       'trending-format': 'seedance-pro',
     };
-    
-    const selectedModel = model_override || modelForCategory[template.category] || 'seedance-pro';
+    const modelForCategoryT2V = {
+      'velocity': 'kling-3.0-t2v',
+      'transition': 'kling-3.0-t2v',
+      'beat-sync': 'kling-3.0-t2v',
+      'text-overlay': 'dop-standard',
+      'montage': 'kling-3.0-t2v',
+      'color-grade': 'dop-standard',
+      'trending-format': 'kling-3.0-t2v',
+    };
+    const categoryModels = hasImages ? modelForCategoryI2V : modelForCategoryT2V;
+    const selectedModel = model_override || categoryModels[template.category] || (hasImages ? 'seedance-pro' : 'kling-3.0-t2v');
     
     const genBody = {
       prompt: editPrompt,
