@@ -8526,7 +8526,7 @@ app.get('/api/auth/facebook', async (req, res) => {
 
 app.get('/health', (_, res) => res.json({ status: 'ok', ts: new Date().toISOString() }));
 app.get('/', (_, res) => res.json({
-  service: 'SocialEngine API', v: '9.0.0', status: 'running',
+  service: 'SocialEngine API', v: '9.5.2', status: 'running',
   crons: { content_gen: '6:00 UTC daily', inventory: '5:00 UTC daily', lead_followup: '14:00 UTC daily', publish: 'every 4h', reminders: '10:00 UTC daily' },
 }));
 
