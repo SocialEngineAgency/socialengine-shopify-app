@@ -1616,7 +1616,7 @@ Distribute evenly across platforms and dates.`;
     model: 'sonar-pro',
     messages: [{ role: 'user', content: prompt }],
     temperature: 0.8,
-    response_format: { type: 'json_object' },
+    
   });
 
   let posts;
@@ -2097,7 +2097,7 @@ Return JSON only:
       model: 'sonar',
       messages: [{ role: 'user', content: finalPrompt }],
       temperature: 0.3,
-      response_format: { type: 'json_object' },
+      
     });
 
     let audit;
@@ -2327,7 +2327,7 @@ Return JSON:
       model: 'sonar-pro',
       messages: [{ role: 'user', content: regenPrompt }],
       temperature: 0.9, // Higher temp = more creative variation
-      response_format: { type: 'json_object' },
+      
     });
 
     const newPost = JSON.parse(completion.choices[0].message.content);
@@ -2821,7 +2821,7 @@ Return JSON:
       model: 'sonar-pro',
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.6,
-      response_format: { type: 'json_object' },
+      
     });
 
     let profile;
@@ -3490,7 +3490,7 @@ Sample products: ${JSON.stringify(clientCatalog.sample_products.slice(0, 20))}` 
       }],
       max_tokens: 2500,
       temperature: 0.3,
-      response_format: { type: 'json_object' },
+      
     });
 
     let result = {};
