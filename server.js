@@ -7962,8 +7962,8 @@ app.get('/api/studio/recent-videos', async (req, res) => {
 
   try {
     const clientName = client.fields.brand_name || client.fields.business_name;
-    // Filter only by client_id — content_type field may not exist in all tables
-    const formula = encodeURIComponent(`AND({client_id}='${clientName}',{video_url}!=''`);
+    // Return all content for this client — videos are those with a video_url set
+    const formula = encodeURIComponent(`{client_id}='${clientName}'`);
     const data = await atGet(TBL.CONTENT, `filterByFormula=${formula}&maxRecords=20&sort%5B0%5D%5Bfield%5D=scheduled_date&sort%5B0%5D%5Bdirection%5D=desc`);
 
     const videos = (data.records || []).map(r => ({
