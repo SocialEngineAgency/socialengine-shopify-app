@@ -2566,7 +2566,7 @@ app.get('/api/client-data', async (req, res) => {
       client: {
         id: client.id, business_name: f.business_name, contact_name: f.contact_name,
         contact_email: f.contact_email, industry: f.industry, tier: f.tier || 'Free',
-        platforms: f.platforms, status: f.status, onboarding_date: f.onboarding_date,
+        platforms: Array.isArray(f.platforms) ? f.platforms : (f.platforms ? f.platforms.split(',').map(p => p.trim()).filter(Boolean) : []), status: f.status, onboarding_date: f.onboarding_date,
         website: f.website, has_onboarded: !!f.onboarding_date,
         is_paid: (f.tier || '').toLowerCase() !== 'free',
       },
@@ -3817,7 +3817,7 @@ CLIENT PROFILE:
 - Business: ${f.business_name}
 - Website: ${f.website || 'Not set'}
 - Industry: ${f.industry || 'E-commerce'}
-- Platforms: ${(f.platforms || []).join(', ') || 'Not yet configured'}
+- Platforms: ${(Array.isArray(f.platforms) ? f.platforms : (f.platforms ? String(f.platforms).split(',').map(p=>p.trim()) : [])).join(', ') || 'Not yet configured'}
 - Plan: ${f.tier || 'Free'}
 ${profile ? `- Brand Archetype: ${profile.archetype || 'Not analysed yet'}
 - Voice Summary: ${profile.voice_summary || ''}
