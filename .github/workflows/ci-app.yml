@@ -1,5 +1,4 @@
-name: CI (GitHub App token)
-
+name: CI
 on:
   push:
   workflow_dispatch:
@@ -11,15 +10,5 @@ jobs:
   smoke:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/create-github-app-token@v1
-        id: app-token
-        with:
-          app-id: ${{ secrets.GH_APP_ID }}
-          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
-
       - uses: actions/checkout@v4
-        with:
-          token: ${{ steps.app-token.outputs.token }}
-
-      - name: OK
-        run: echo "GitHub App auth + checkout succeeded"
+      - run: echo "OK - standard Actions token"
