@@ -8991,6 +8991,330 @@ cron.schedule('0 */4 * * *', () => {
 });
 
 // ━━━ Start ━━━
+
+// ═══════════════════════════════════════════════════════════════════
+// SHOPIFY EMBEDDED APP ENDPOINTS (auto-injected from patches/)
+// ═══════════════════════════════════════════════════════════════════
+
+// ─── Inline auth middleware (reuse if a shared middleware already exists) ─────
+
+function requireEmbeddedAppKey(req, res, next) {
+  const key = req.headers['x-socialengine-key'] || req.headers['x-shopify-embedded-key'];
+  const expected = process.env.SOCIALENGINE_API_KEY || process.env.SHOPIFY_EMBEDDED_API_KEY;
+
+  if (!expected) {
+    // Key not configured on server — log and allow through in development only
+    if (process.env.NODE_ENV === 'production') {
+      return res.status(500).json({ success: false, message: 'Embedded app key not configured on server.' });
+    }
+    log('EMBEDDED_AUTH', 'WARNING: SOCIALENGINE_API_KEY not set — bypassing auth in dev');
+    return next();
+  }
+
+  if (!key || key !== expected) {
+    return res.status(401).json({ success: false, message: 'Unauthorized — invalid or missing X-SocialEngine-Key.' });
+  }
+
+  next();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/shopify/link
+//
+// Links a Shopify store domain to an existing SocialEngine client account by
+// looking up the client by email in Airtable and updating their shopify_domain
+// field. Called from app.settings.jsx in the embedded app.
+//
+// Request body:
+//   {
+//     "shopify_domain": "merchant.myshopify.com",
+//     "socialengine_email": "client@example.com"
+//   }
+//
+// Response (success):
+//   { "success": true, "client_name": "Acme Brand", "message": "..." }
+//
+// Response (failure):
+//   { "success": false, "message": "..." }
+// ─────────────────────────────────────────────────────────────────────────────
+
+app.post('/api/shopify/link', requireEmbeddedAppKey, async (req, res) => {
+  try {
+    const { shopify_domain, socialengine_email } = req.body;
+
+    if (!shopify_domain || !socialengine_email) {
+      return res.status(400).json({
+        success: false,
+        message: 'Both shopify_domain and socialengine_email are required.',
+      });
+    }
+
+    const domain = String(shopify_domain).trim().toLowerCase();
+    const email = String(socialengine_email).trim().toLowerCase();
+
+    // Validate domain format
+    if (!domain.includes('.')) {
+      return res.status(400).json({ success: false, message: 'Invalid shopify_domain format.' });
+    }
+
+    // Look up client by email
+    const formula = encodeURIComponent(`{contact_email}='${email}'`);
+    let data;
+    try {
+      data = await atGet(TBL.CLIENTS, `filterByFormula=${formula}&maxRecords=1`);
+    } catch (atErr) {
+      log('SHOPIFY_LINK', `Airtable lookup failed: ${atErr.message}`);
+      return res.status(502).json({ success: false, message: 'Airtable lookup failed.' });
+    }
+
+    const record = data?.records?.[0];
+    if (!record) {
+      return res.status(404).json({
+        success: false,
+        message: `No SocialEngine client found with email: ${email}`,
+      });
+    }
+
+    const clientName = record.fields.business_name || record.fields.contact_email || email;
+    const existingDomain = record.fields.shopify_domain;
+
+    // If already linked to a different domain, warn but allow re-link
+    if (existingDomain && existingDomain !== domain) {
+      log('SHOPIFY_LINK', `Re-linking ${email} from ${existingDomain} to ${domain}`);
+    }
+
+    // Update shopify_domain on the client record
+    try {
+      await atUpdate(TBL.CLIENTS, record.id, { shopify_domain: domain });
+    } catch (updateErr) {
+      log('SHOPIFY_LINK', `Airtable update failed: ${updateErr.message}`);
+      return res.status(502).json({ success: false, message: 'Failed to update client record.' });
+    }
+
+    log('SHOPIFY_LINK', `Linked ${domain} to client ${email} (${clientName})`);
+
+    return res.json({
+      success: true,
+      client_name: clientName,
+      shopify_domain: domain,
+      message: `Store ${domain} linked to SocialEngine client "${clientName}".`,
+    });
+
+  } catch (err) {
+    log('SHOPIFY_LINK', `Unhandled error: ${err.message}`);
+    return res.status(500).json({ success: false, message: 'Internal server error.' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DELETE /api/shopify/link
+//
+// Unlinks a Shopify store from its SocialEngine client account by clearing the
+// shopify_domain field on the client record.
+//
+// Request body:
+//   { "shopify_domain": "merchant.myshopify.com" }
+//
+// Response:
+//   { "success": true, "message": "..." }
+// ─────────────────────────────────────────────────────────────────────────────
+
+app.delete('/api/shopify/link', requireEmbeddedAppKey, async (req, res) => {
+  try {
+    const { shopify_domain } = req.body;
+
+    if (!shopify_domain) {
+      return res.status(400).json({ success: false, message: 'shopify_domain is required.' });
+    }
+
+    const domain = String(shopify_domain).trim().toLowerCase();
+    const formula = encodeURIComponent(`{shopify_domain}='${domain}'`);
+
+    let data;
+    try {
+      data = await atGet(TBL.CLIENTS, `filterByFormula=${formula}&maxRecords=1`);
+    } catch (atErr) {
+      return res.status(502).json({ success: false, message: 'Airtable lookup failed.' });
+    }
+
+    const record = data?.records?.[0];
+    if (!record) {
+      return res.status(404).json({ success: false, message: `No client linked to domain: ${domain}` });
+    }
+
+    await atUpdate(TBL.CLIENTS, record.id, { shopify_domain: '' });
+    log('SHOPIFY_LINK', `Unlinked domain ${domain} from client ${record.fields.contact_email}`);
+
+    return res.json({ success: true, message: `Store ${domain} unlinked from SocialEngine.` });
+
+  } catch (err) {
+    log('SHOPIFY_LINK', `Unlink error: ${err.message}`);
+    return res.status(500).json({ success: false, message: 'Internal server error.' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/shopify/store-content?domain=merchant.myshopify.com[&check_link=true]
+//
+// Returns recent generated video/content records for a given Shopify store
+// domain. Optionally checks if the domain is linked (check_link=true).
+//
+// Query params:
+//   domain      — the store's .myshopify.com domain (required)
+//   check_link  — if "true", also return linked_email field
+//   limit       — max records to return (default 20, max 100)
+//   offset      — pagination offset (default 0)
+//   platform    — filter by platform (optional: instagram, tiktok, etc.)
+//
+// Response:
+//   {
+//     "success": true,
+//     "domain": "merchant.myshopify.com",
+//     "linked_email": "client@example.com",   // only if check_link=true
+//     "client_email": "client@example.com",   // alias
+//     "videos": [ { id, title, platform, status, attributed_revenue, created_at, preview_url } ],
+//     "total": 42
+//   }
+// ─────────────────────────────────────────────────────────────────────────────
+
+app.get('/api/shopify/store-content', requireEmbeddedAppKey, async (req, res) => {
+  try {
+    const {
+      domain,
+      check_link,
+      limit: limitParam = '20',
+      offset: offsetParam = '0',
+      platform,
+    } = req.query;
+
+    if (!domain) {
+      return res.status(400).json({ success: false, message: 'domain query parameter is required.' });
+    }
+
+    const shopDomain = String(domain).trim().toLowerCase();
+    const limit = Math.min(parseInt(limitParam, 10) || 20, 100);
+    const offset = parseInt(offsetParam, 10) || 0;
+
+    // Look up the client record linked to this domain
+    const clientFormula = encodeURIComponent(`{shopify_domain}='${shopDomain}'`);
+    let clientData;
+    try {
+      clientData = await atGet(TBL.CLIENTS, `filterByFormula=${clientFormula}&maxRecords=1`);
+    } catch (atErr) {
+      return res.status(502).json({ success: false, message: 'Airtable client lookup failed.' });
+    }
+
+    const clientRecord = clientData?.records?.[0];
+    const linkedEmail = clientRecord?.fields?.contact_email ?? null;
+
+    if (check_link === 'true') {
+      // Just return link status without content fetch
+      if (!clientRecord) {
+        return res.json({ success: true, domain: shopDomain, linked: false, linked_email: null, client_email: null });
+      }
+      return res.json({
+        success: true,
+        domain: shopDomain,
+        linked: true,
+        linked_email: linkedEmail,
+        client_email: linkedEmail,
+      });
+    }
+
+    if (!clientRecord) {
+      return res.json({
+        success: true,
+        domain: shopDomain,
+        videos: [],
+        total: 0,
+        linked_email: null,
+        message: `No SocialEngine client linked to domain ${shopDomain}.`,
+      });
+    }
+
+    // Build content filter — look up by contact_email (the primary join key)
+    let contentFormula;
+    if (platform) {
+      contentFormula = encodeURIComponent(
+        `AND({client_email}='${linkedEmail}',{platform}='${platform}')`
+      );
+    } else {
+      contentFormula = encodeURIComponent(`{client_email}='${linkedEmail}'`);
+    }
+
+    // Airtable doesn't support server-side offset — fetch all and slice
+    // For production scale, implement cursor-based pagination or use a relational DB
+    let allRecords;
+    try {
+      allRecords = await atGetAll(
+        TBL.CONTENT,
+        `filterByFormula=${contentFormula}&sort%5B0%5D%5Bfield%5D=created_at&sort%5B0%5D%5Bdirection%5D=desc`
+      );
+    } catch (atErr) {
+      log('STORE_CONTENT', `Content lookup failed: ${atErr.message}`);
+      return res.status(502).json({ success: false, message: 'Content lookup failed.' });
+    }
+
+    const total = allRecords.length;
+    const page = allRecords.slice(offset, offset + limit);
+
+    const videos = page.map((rec) => {
+      const f = rec.fields;
+      return {
+        id: rec.id,
+        title: f.title || f.caption_text || f.product_name || 'Untitled',
+        platform: f.platform || null,
+        status: f.status || f.approval_status || null,
+        attributed_revenue: f.attributed_revenue || f.revenue_attributed || null,
+        created_at: f.created_at || f.Created || null,
+        preview_url: f.preview_url || f.video_url || f.asset_url || null,
+        thumbnail_url: f.thumbnail_url || null,
+      };
+    });
+
+    log('STORE_CONTENT', `Returned ${videos.length}/${total} records for ${shopDomain}`);
+
+    return res.json({
+      success: true,
+      domain: shopDomain,
+      linked_email: linkedEmail,
+      client_email: linkedEmail,
+      videos,
+      total,
+    });
+
+  } catch (err) {
+    log('STORE_CONTENT', `Unhandled error: ${err.message}`);
+    return res.status(500).json({ success: false, message: 'Internal server error.' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// END OF PATCH FILE
+//
+// TESTING THESE ENDPOINTS (local curl examples):
+//
+// Link a store:
+//   curl -X POST http://localhost:3001/api/shopify/link \
+//     -H "Content-Type: application/json" \
+//     -H "X-SocialEngine-Key: your_key" \
+//     -d '{"shopify_domain":"test.myshopify.com","socialengine_email":"client@example.com"}'
+//
+// Get store content:
+//   curl "http://localhost:3001/api/shopify/store-content?domain=test.myshopify.com&limit=5" \
+//     -H "X-SocialEngine-Key: your_key"
+//
+// Check link status:
+//   curl "http://localhost:3001/api/shopify/store-content?domain=test.myshopify.com&check_link=true" \
+//     -H "X-SocialEngine-Key: your_key"
+//
+// Unlink a store:
+//   curl -X DELETE http://localhost:3001/api/shopify/link \
+//     -H "Content-Type: application/json" \
+//     -H "X-SocialEngine-Key: your_key" \
+//     -d '{"shopify_domain":"test.myshopify.com"}'
+// ─────────────────────────────────────────────────────────────────────────────
+
 app.listen(PORT, () => {
   log('SERVER', 'SocialEngine API v9.0 — PERPLEXITY + HIGGSFIELD + UPLOAD-POST');
   log('SERVER', `Port: ${PORT}`);

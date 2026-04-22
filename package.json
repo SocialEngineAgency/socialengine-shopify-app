@@ -1,6 +1,6 @@
 {
   "name": "socialengine-api",
-  "version": "9.7.0",
+  "version": "9.8.0",
   "scripts": {
     "start": "node server.js"
   },
