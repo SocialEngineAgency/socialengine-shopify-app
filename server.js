@@ -3478,6 +3478,13 @@ app.post('/api/brand-fingerprint', async (req, res) => {
   }
 });
 
+
+// ── POST /api/onboard ── (alias for /api/onboarding — added for PR #18 compatibility)
+app.post('/api/onboard', (req, res, next) => {
+  req.url = '/api/onboarding';
+  app._router.handle(req, res, next);
+});
+
 // ── POST /api/onboarding ──
 app.post('/api/onboarding', async (req, res) => {
   const { answers } = req.body;
